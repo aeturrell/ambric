@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime
 
 import numpy as np
 import numpy.typing as npt
@@ -93,11 +92,10 @@ def gen_unique_id() -> str:
     """Creates a unique, time-based ID for a model run.
 
     Returns:
-        str: ID string in format YYYY_MM_DD_HH_MM_UUID
+        str: ID string in format UUID
     """
-    dt_str = datetime.now().strftime("%Y_%m_%d_%H_%M")
     run_str = str(uuid.uuid4()).split("-")[0]
-    return dt_str + "_" + run_str
+    return run_str
 
 
 def prep_data_for_model_run(

@@ -172,7 +172,6 @@ def plot_national_quarterly_vs_implied(
     y_uk: npt.NDArray[np.float64],
     y_uk_implied: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
-    model_id: str,
     path: Path | None = None,
 ):
     """Plot national quarterly growth rates: observed vs implied.
@@ -182,7 +181,6 @@ def plot_national_quarterly_vs_implied(
         y_uk_implied (npt.NDArray[np.float64]): Implied UK quarterly growth rates
         datetime_ts (pd.Series): Time series of quarterly dates
         path (Path | str): Path to save the plot
-        model_id (str, optional): Model ID to include in the plot title. Defaults to "".
     """
     rmse_national_q = rmse_national_quarterly(y_uk, y_uk_implied)
     fig, ax = plt.subplots(figsize=(15, 6))
@@ -247,8 +245,9 @@ def plot_national_quarterly_vs_implied(
     )
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / f"AMBRIC_q_uk_{model_id}.svg"))
-    plt.show()
+        plt.savefig(Path(path / "AMBRIC_quarterly_national.svg"))
+    else:
+        plt.show()
     plt.close()
 
 
@@ -257,7 +256,6 @@ def plot_regional_annual_estimate(
     y_annual_est: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    model_id: str,
     path: Path | None = None,
 ):
     rmse_regional_a = rmse_regions_annual(y_annual_true, y_annual_est)
@@ -339,8 +337,9 @@ def plot_regional_annual_estimate(
     fig.autofmt_xdate()
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / f"AMBRIC_a_r_{model_id}.svg"))
-    plt.show()
+        plt.savefig(Path(path / "AMBRIC_annual_regional.svg"))
+    else:
+        plt.show()
     plt.close()
 
 
@@ -350,7 +349,6 @@ def plot_single_region_annual_estimate(
     datetime_ts: pd.Series,
     region_idx: int,
     region_names: list[str],
-    model_id: str,
     lag_qtrs: int,
     path: Path | None = None,
 ):
@@ -428,8 +426,9 @@ def plot_single_region_annual_estimate(
     plt.suptitle("Annual q-on-4q Regional Growth: True vs Estimated")
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / f"AMBRIC_a_{region_names[region_idx]}_{model_id}.svg"))
-    plt.show()
+        plt.savefig(Path(path / f"AMBRIC_annual_{region_names[region_idx]}.svg"))
+    else:
+        plt.show()
     plt.close()
 
 
@@ -437,7 +436,6 @@ def plot_estimated_regional_quarterly(
     y_reg_est: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    model_id: str,
     lag_qtrs: int,
     path: Path | None = None,
 ):
@@ -472,8 +470,9 @@ def plot_estimated_regional_quarterly(
     fig.autofmt_xdate()
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / f"AMBRIC_q_r_{model_id}.svg"))
-    plt.show()
+        plt.savefig(Path(path / "AMBRIC_quarterly_regional.svg"))
+    else:
+        plt.show()
 
 
 # Out of sample results diagnostics from here
@@ -522,7 +521,8 @@ def plot_out_of_sample_rmse(df_a_r_oos: pd.DataFrame, path: Path | None = None):
     fig.autofmt_xdate()
     if path is not None:
         plt.savefig(Path(path / "out_of_sample_rmse.svg"))
-    plt.show()
+    else:
+        plt.show()
     plt.close()
 
 
@@ -637,7 +637,8 @@ def plot_out_of_sample_nowcasts(
             plt.savefig(
                 path / f"out_of_sample_nowcast_{region.lower().replace(' ', '_')}.svg"
             )
-        plt.show()
+        else:
+            plt.show()
         plt.close()
 
 
@@ -646,7 +647,6 @@ def plot_current_nowcast(
     y_annual,
     datetime_ts,
     region_names,
-    model_id,
     lag_qtrs,
     backlook_qtrs: int = 6,
     path: Path | None = None,
@@ -693,10 +693,10 @@ def plot_current_nowcast(
     plt.tight_layout()
     if path is not None:
         plt.savefig(
-            path
-            / f"AMBRIC_nowcast_{t_datetime_ts.iloc[-1].strftime('%Y_%m')}_{model_id}.svg"
+            path / f"AMBRIC_nowcast_{t_datetime_ts.iloc[-1].strftime('%Y_%m')}.svg"
         )
-    plt.show()
+    else:
+        plt.show()
     plt.close()
 
 

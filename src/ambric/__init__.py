@@ -911,7 +911,6 @@ class Ambric:
             y_a_r_est_point,
             self.datetime_ts,
             self.region_names,
-            self.model_id,
             path=path,
         )
         logger.info("Plotted regional annual growth rates vs estimated from the model.")
@@ -941,13 +940,10 @@ class Ambric:
             self.datetime_ts,
             region_idx,
             self.region_names,
-            self.model_id,
             self.lag_qtrs,
             path=path,
         )
-        logger.info(
-            f"Plotted annual growth rates vs estimated from the model for region: {region_name}."
-        )
+        logger.info(f"Plotted annual vs estimated for region: {region_name}.")
 
     def plot_estimated_regional_quarterly(self, path: str | Path | None = None) -> None:
         """Plot estimated regional quarterly growth rates from the model.
@@ -969,7 +965,6 @@ class Ambric:
             y_q_r_est_point,
             self.datetime_ts,
             self.region_names,
-            self.model_id,
             self.lag_qtrs,
             path=path,
         )
@@ -988,7 +983,6 @@ class Ambric:
             y_annual=self.y_annual,
             datetime_ts=self.datetime_ts,
             region_names=self.region_names,
-            model_id=self.model_id,
             lag_qtrs=self.lag_qtrs,
             backlook_qtrs=backlook,
             path=path,
