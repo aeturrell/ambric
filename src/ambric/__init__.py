@@ -26,6 +26,7 @@ where delta_r is estimated with a hierarchical shrinkage prior, allowing
 the model to learn the value of the XGBoost bridge signal per region.
 """
 
+import logging
 from importlib.metadata import PackageNotFoundError, version
 
 try:
@@ -63,6 +64,30 @@ from ambric.diagnostics import (
     trace_to_series,
 )
 from ambric.utilities import OMEGA, gen_unique_id, prep_data_for_model_run
+
+
+# ---------------------------------------------------------------------------
+# Forward loguru logs to stdlib logging so that frameworks like Hydra,
+# which configure the stdlib logging module, can capture ambric's output.
+# ---------------------------------------------------------------------------
+class _StdlibHandler(logging.Handler):
+    """Receive records from loguru and re-emit via stdlib logging."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logging.getLogger(record.name).handle(record)
+
+
+def _propagate_loguru_to_stdlib() -> None:
+    """Add a loguru sink that forwards to stdlib ``logging``."""
+    logger.add(
+        _StdlibHandler(),
+        format="{message}",
+        level="DEBUG",
+    )
+
+
+_propagate_loguru_to_stdlib()
+
 
 # =============================================================================
 # Helper Functions: Imputation & Factor Extraction
