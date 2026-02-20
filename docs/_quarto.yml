@@ -1,0 +1,46 @@
+project:
+  type: website
+
+website:
+  title: "AMBRIC"
+  favicon: favicon.ico
+  twitter-card: true
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: use.ipynb
+        text: Use
+      - text: "Reference"
+        file: reference/index.qmd
+
+format:
+  html:
+    theme: flatly
+    css: styles.css
+    toc: true
+
+# tell quarto to read the generated sidebar
+metadata-files:
+  - _sidebar.yml
+
+
+quartodoc:
+  # the name used to import the package you want to create reference docs for
+  package: AMBRIC
+  parser: google
+
+  # write sidebar data to this file
+  sidebar: _sidebar.yml
+
+  sections:
+    - title: "Reference"
+      desc: "What AMBRIC's functions do"
+      contents:
+        # the functions being documented in the package.
+        # you can refer to anything: class methods, modules, etc..
+        - Ambric
+        - run_out_of_sample_exercise
+        - diagnostics.plot_out_of_sample_nowcasts
+        - diagnostics.plot_current_nowcast
+        - diagnostics.out_of_sample_classification_performance_table
