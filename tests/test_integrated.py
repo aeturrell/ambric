@@ -45,7 +45,7 @@ def test_vanilla_run(mock_show) -> None:
     n_posterior_samples = 3000
 
     logger.info(
-        f"Fitting Ambric model with {n_its} iterations and {n_posterior_samples} posterior samples"
+        f"Fitting AMBRIC model with {n_its} iterations and {n_posterior_samples} posterior samples"
     )
 
     amb.fit(
@@ -53,7 +53,7 @@ def test_vanilla_run(mock_show) -> None:
         n_posterior_samples=n_posterior_samples,
     )
 
-    logger.info("Ambric model fit complete")
+    logger.info("AMBRIC model fit complete")
 
     amb.plot_national_quarterly_vs_implied()
     amb.plot_regional_annual_estimate()
@@ -95,7 +95,7 @@ def test_pseudo_realtime_directly(mock_show) -> None:
 
     aggregation_region = "uk"
 
-    df_results, df_annual_regional, df_quarterly_national = run_out_of_sample_exercise(
+    df_results = run_out_of_sample_exercise(
         df,
         macro_names,
         region_names,
@@ -107,11 +107,12 @@ def test_pseudo_realtime_directly(mock_show) -> None:
         n_its=n_its,
         n_posterior_samples=n_posterior_samples,
         lag_qtrs=lag_qtrs,
+        step_size=20,
     )
 
-    plot_out_of_sample_rmse(df_annual_regional)
-    plot_out_of_sample_nowcasts(df_annual_regional, df, region_measure=region_measure)
-    out_of_sample_classification_performance_table(df_annual_regional)
+    plot_out_of_sample_rmse(df_results, region_measure=region_measure)
+    plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
+    out_of_sample_classification_performance_table(df_results, region_measure)
     mock_show.assert_called()
 
 
@@ -148,7 +149,7 @@ def test_pseudo_realtime_with_early_nan_covariates(mock_show) -> None:
     mask = df["measure"].isin(region_covariate_names) & df["datetime"].isin(early_dates)
     df.loc[mask, "value"] = np.nan
 
-    df_results, df_annual_regional, df_quarterly_national = run_out_of_sample_exercise(
+    df_results = run_out_of_sample_exercise(
         df,
         macro_names,
         region_names,
@@ -160,9 +161,10 @@ def test_pseudo_realtime_with_early_nan_covariates(mock_show) -> None:
         n_its=n_its,
         n_posterior_samples=n_posterior_samples,
         lag_qtrs=lag_qtrs,
+        step_size=20,
     )
 
-    plot_out_of_sample_rmse(df_annual_regional)
-    plot_out_of_sample_nowcasts(df_annual_regional, df, region_measure=region_measure)
-    out_of_sample_classification_performance_table(df_annual_regional)
+    plot_out_of_sample_rmse(df_results, region_measure=region_measure)
+    plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
+    out_of_sample_classification_performance_table(df_results, region_measure)
     mock_show.assert_called()

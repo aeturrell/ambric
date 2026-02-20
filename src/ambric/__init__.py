@@ -27,6 +27,7 @@ the model to learn the value of the XGBoost bridge signal per region.
 """
 
 import logging
+import math
 from importlib.metadata import PackageNotFoundError, version
 
 try:
@@ -60,7 +61,6 @@ from ambric.diagnostics import (
     plot_national_quarterly_vs_implied,
     plot_regional_annual_estimate,
     plot_single_region_annual_estimate,
-    rmse_national_quarterly,
     trace_to_series,
 )
 from ambric.utilities import OMEGA, gen_unique_id, prep_data_for_model_run
@@ -87,6 +87,21 @@ def _propagate_loguru_to_stdlib() -> None:
 
 
 _propagate_loguru_to_stdlib()
+
+
+def quarter_differences(ts_one: pd.Series, time: pd.Timestamp) -> pd.Series:
+    """Generates difference in number of full quarters between a time series and a time.
+
+    Args:
+        ts_one (pd.Series): Series of datetime-like values.
+        time (pd.Timestamp): Reference timestamp.
+
+    Returns:
+        pd.Series: Difference in number of full quarters between the two series.
+    """
+    quarters_ts = ts_one.dt.year * 4 + (ts_one.dt.month - 1) // 3
+    quarter_time = time.year * 4 + (time.month - 1) // 3
+    return quarters_ts - quarter_time
 
 
 # =============================================================================
@@ -163,7 +178,7 @@ def extract_factors_from_panel(
     logger.info(
         f"FA: Extracted {n_factors} factors. Approximate explained variance: {explained_var:.1%}"
     )
-    logger.info(
+    logger.debug(
         f"Noise variances range: {fa.noise_variance_.min():.3f} - {fa.noise_variance_.max():.3f}"
     )
 
@@ -454,8 +469,8 @@ def fit_bridge_equation(
     intercept = bridge_reg.intercept_
 
     logger.info(f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
-    logger.info(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
-    logger.info(f"Bridge: intercept = {intercept:.4f}")
+    logger.debug(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
+    logger.debug(f"Bridge: intercept = {intercept:.4f}")
 
     # --- Construct quarterly signal s_{t,r} ---
     quarterly_signal = np.zeros((T, R))
@@ -472,7 +487,7 @@ def fit_bridge_equation(
                 (intercept / 4.0) + xgb_component + indicator_component
             )
 
-    logger.info(
+    logger.debug(
         f"Bridge equation: Quarterly signal shape = {quarterly_signal.shape}, "
         f"mean = {np.nanmean(quarterly_signal):.6f}, "
         f"std = {np.nanstd(quarterly_signal):.6f}"
@@ -528,9 +543,9 @@ def build_ambric_model(
     _, M = macro.shape
     _, R = y_annual.shape
 
-    logger.info("Building ambric model:")
-    logger.info(f"   {K} factors, {M} macro series, {T} quarters, {R} regions")
-    logger.info(f"   Bridge signal: shape {bridge_signal.shape}")
+    logger.info("Building AMBRIC model:")
+    logger.debug(f"   {K} factors, {M} macro series, {T} quarters, {R} regions")
+    logger.debug(f"   Bridge signal: shape {bridge_signal.shape}")
 
     with pm.Model() as model:
         # --- Hierarchical factor loadings ---
@@ -838,7 +853,7 @@ class Ambric:
         )
 
         # Step 4: Build PyMC model
-        logger.info("\n[4/5] Building ambric Bayesian model...")
+        logger.info("\n[4/5] Building AMBRIC Bayesian model...")
         self.model = build_ambric_model(
             self.y_uk,
             self.y_annual,
@@ -881,6 +896,18 @@ class Ambric:
         logger.info(f"Model trace saved to {path}/model_trace_{self.model_id}.nc")
 
     def populate_results(self) -> pd.DataFrame:
+        """Returns results from model estimation, and original data, in format:
+
+        | datetime | region | value | measure | type
+
+        where type can be "outturn" or "nowcast"
+
+        Raises:
+            ValueError: If model not fitted
+
+        Returns:
+            pd.DataFrame: Dataframe of results
+        """
         if self.trace is None:
             raise ValueError(
                 "Model trace is not available. Fit the model before saving the trace."
@@ -932,7 +959,7 @@ class Ambric:
 
         y_q_uk_est_point, y_q_r_est_point, y_a_r_est_point = trace_to_series(self.trace)
         plot_national_quarterly_vs_implied(
-            self.y_uk, y_q_uk_est_point, self.datetime_ts, self.model_id, path=path
+            self.y_uk, y_q_uk_est_point, self.datetime_ts, path=path
         )
         logger.info(
             "Plotted national quarterly growth rates vs implied estimates from the model."
@@ -1084,12 +1111,12 @@ def run_out_of_sample_exercise(
     aggregate_measure: str = "gva_q_on_q",
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
-    no_steps: int = 4,
+    step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
     n_its=100000,
     n_posterior_samples=3000,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """Run out-of-sample exercise to evaluate model performance.
 
     Masks the most recent annual regional data by `lag_qtrs` quarters and fits the model in chunks. End scores for the out-of-sample period for annual regional estimates are recorded and returned.
@@ -1112,59 +1139,46 @@ def run_out_of_sample_exercise(
     Returns:
         tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: Out-of-sample summary statistics, Annual-regional predictions and outturns, national quarterly predictions and outturns
     """
-    logger.info("This will take time to run")
-    T: int = df.loc[df["measure"] == aggregate_measure, "datetime"].nunique()
-    t_chunk_size: int = (np.floor((T - init_chunk_size) / no_steps)).astype(int)
+    df = df.sort_values("datetime")
+    stop: int = df.loc[df["measure"] == aggregate_measure, "datetime"].nunique()
+    start = init_chunk_size
+    num_steps = math.ceil((stop - start) / step_size)
+    datetime_spine: pd.Series = df.loc[df["measure"] == aggregate_measure, "datetime"]
+    datetime_spine = datetime_spine.sort_values()
+    logger.info(f"Running out-of-sample analysis on {region_measure}:\n")
+    logger.info(
+        f"    burn-in: from {datetime_spine.iloc[0].strftime('%Y-%b')} to {datetime_spine.iloc[start].strftime('%Y-%b')}"
+    )
+    logger.info(f"    steps: {num_steps}")
+    logger.info(f"    step size: {step_size}")
     df_results = pd.DataFrame()
-    df_annual_regional = pd.DataFrame()
-    df_quarterly_national = pd.DataFrame()
-    for i, step in enumerate(range(no_steps + 1)):
-        if step == no_steps:
-            T_max = T
-        else:
-            T_max = int(init_chunk_size + step * t_chunk_size)
-
-        # wedge details. NB start segment is always zeroth entry
-        start_segment = 0
-        start_segment_oos = T_max - lag_qtrs
-        end_segment = T_max
-        datetimes_this_wedge = df["datetime"].unique()[start_segment:end_segment]
-        datetimes_this_wedge_oos = df["datetime"].unique()[
-            start_segment_oos:end_segment
-        ]
-        # Prepare data for model run
-        # Only take entries to the end of the segment.
-        this_df = df[df["datetime"].isin(datetimes_this_wedge)].copy()
-        # Create a filter for those values that will be masked
+    counter = 1
+    for T_it in range(start, stop, step_size):
+        # wedge details. NB start data point is always zeroth entry
+        start_segment_oos = T_it - lag_qtrs
+        logger.info(
+            f"Nowcast step running up to {datetime_spine.iloc[T_it].strftime('%Y-%b')}"
+        )
+        logger.info(
+            f"    Out-of-sample period: {datetime_spine.iloc[start_segment_oos].strftime('%Y-%b')} to {datetime_spine.iloc[T_it].strftime('%Y-%b')}"
+        )
+        # Prepare data for model run. Only take entries to the end of the segment.
+        df_it = df.loc[df["datetime"] <= datetime_spine.iloc[T_it]].copy()
+        # Create a filter for those values that will be masked because
+        # we wish to attempt to predict them
         filter = (
-            (this_df["region"].isin(region_names))
-            & (this_df["measure"] == region_measure)
-            & (this_df["datetime"].isin(datetimes_this_wedge_oos))
+            (df_it["region"].isin(region_names))
+            & (df_it["measure"] == region_measure)
+            & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos])
         )
-        # get the values that will be masked for oos evaluation
-        series_y_actual_annual_oos = (
-            df.loc[
-                (df["measure"] == region_measure)
-                & (df["datetime"].isin(datetimes_this_wedge))
-            ]
-            .pivot_table(
-                index="datetime", columns="region", values="value", dropna=False
-            )
-            .copy()
-        )
-        y_actual_annual_oos = series_y_actual_annual_oos.values
-        y_actual_annual_oos = y_actual_annual_oos[-lag_qtrs:]
-
         # Block the annual regional data that has yet to be observed
-        this_df.loc[
-            filter,
-            "value",
-        ] = np.nan
+        df_it_masked = df_it.copy()
+        df_it_masked.loc[filter, "value"] = np.nan
         amb = Ambric(
-            this_df,
-            macro_names,
-            region_names,
-            region_covariate_names,
+            df_it_masked,
+            macro_names=macro_names,
+            region_names=region_names,
+            region_covariate_names=region_covariate_names,
             n_factors=n_factors,
             aggregate_measure=aggregate_measure,
             aggregation_region=aggregation_region,
@@ -1182,57 +1196,46 @@ def run_out_of_sample_exercise(
             n_posterior_samples=n_posterior_samples,
         )
 
-        logger.info("Ambric model fit complete")
+        logger.info("AMBRIC model fit complete")
 
         # Extract estimates
-        y_q_uk_est_point, y_q_r_est_point, y_a_r_est_point = trace_to_series(amb.trace)
-
-        # Check that the model really didn't have access to the oos
-        # annual numbers
-        assert np.all(np.isnan(amb.y_annual[start_segment_oos:end_segment, :]))
-        # known answer unseen by model
-        rmse_national_q = rmse_national_quarterly(amb.y_uk, y_q_uk_est_point)
-        # Out of sample annual rmse
-
-        y_a_r_est_point_realtime = y_a_r_est_point[-lag_qtrs:, :].copy()
-        rmse_out_of_sample = np.sqrt(
-            np.nanmean(np.square(y_a_r_est_point_realtime - y_actual_annual_oos))
+        results_df_it = amb.populate_results()
+        # | datetime | region | value | measure | type
+        # We only want the nowcast from this
+        results_df_it = results_df_it.loc[results_df_it["type"] == "nowcast"].copy()
+        # Now we wish to combine it with only the relevant entries in the true data
+        df_only_relevant = df.loc[
+            df["datetime"].isin(results_df_it["datetime"].unique()), :
+        ].copy()
+        df_only_relevant["type"] = "outturn"
+        # The earliest OOS value will be the one that is only 1 quarter away from publication, and so on. The max should be lag_qtrs.
+        # Put this in as the difference in time to the most recent
+        # data point for which there's a known value
+        results_df_it["quarters_to_publication"] = quarter_differences(
+            results_df_it["datetime"], datetime_spine.iloc[start_segment_oos - 1]
         )
-        logger.info(
-            f"Step {step+1}/{no_steps+1} | T_max={T_max} for this iteration | RMSE National Q: {rmse_national_q:.4f}  | RMSE OOS Annual: {rmse_out_of_sample:.4f}"
+        # For outturns, qtrs to pub doesn't make sense
+        df_only_relevant["quarters_to_publication"] = np.nan
+
+        est_and_orig_df = pd.concat([results_df_it, df_only_relevant], axis=0)
+        # Now wish to filter down to just those entries that are out-of-sample
+        oos_datetimes = pd.Series(
+            [
+                x
+                for x in df_it["datetime"].unique()
+                if x >= datetime_spine.iloc[start_segment_oos]
+            ]
         )
-        df_sim_here = pd.DataFrame(
-            {
-                "step": step + 1,
-                "T_max": T_max,
-                "rmse_national_quarterly": rmse_national_q,
-                "rmse_out_of_sample_annual": rmse_out_of_sample,
-            },
-            index=pd.Index([0]),
-        )
-        df_sim_here["nowcast_index"] = i
-        df_results = pd.concat([df_results, df_sim_here], ignore_index=True)
-        df_ar_here_outturn = pd.DataFrame(y_actual_annual_oos)
-        df_ar_here_outturn.columns = region_names
-        df_ar_here_outturn.index = series_y_actual_annual_oos.index[-lag_qtrs:]
-        df_ar_here_outturn["quarters_to_publication"] = range(1, lag_qtrs + 1, 1)
-        df_ar_here_outturn["type"] = "outturn"
-        df_ar_here_nowcast = pd.DataFrame(y_a_r_est_point_realtime)
-        df_ar_here_nowcast.columns = region_names
-        df_ar_here_nowcast.index = series_y_actual_annual_oos.index[-lag_qtrs:]
-        df_ar_here_nowcast["type"] = "nowcast"
-        df_ar_here_nowcast["quarters_to_publication"] = range(1, lag_qtrs + 1, 1)
-        df_ar_here = pd.concat([df_ar_here_nowcast, df_ar_here_outturn], axis=0)
-        df_ar_here["nowcast_index"] = i
-
-        df_annual_regional = pd.concat([df_annual_regional, df_ar_here], axis=0)
-
-        df_uk_q_here = pd.DataFrame(data=amb.y_uk, columns=pd.Index(["outturn"]))
-        df_uk_q_here.index = datetimes_this_wedge
-        df_uk_q_here["nowcast"] = y_q_uk_est_point
-        # cut only to the regional data oos period
-        df_uk_q_here = df_uk_q_here.iloc[-lag_qtrs:, :]
-        df_uk_q_here["nowcast_index"] = i
-        df_quarterly_national = pd.concat([df_quarterly_national, df_uk_q_here], axis=0)
-
-    return df_results, df_annual_regional, df_quarterly_national
+        est_and_orig_df = est_and_orig_df.loc[
+            est_and_orig_df["datetime"].isin(oos_datetimes), :
+        ].copy()
+        est_and_orig_df["nowcast_index"] = T_it
+        logger.info(f"Time period {T_it}/{len(datetime_spine)} complete")
+        logger.info(f"Step {counter} of {num_steps} complete")
+        logger.info("----------------------------------------")
+        counter = counter + 1
+        est_and_orig_df = est_and_orig_df.loc[
+            est_and_orig_df["measure"].isin([aggregate_measure, region_measure]), :
+        ].copy()
+        df_results = pd.concat([df_results, est_and_orig_df], ignore_index=True)
+    return df_results

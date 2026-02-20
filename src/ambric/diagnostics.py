@@ -3,7 +3,6 @@
 # -----------------------------------------------------------------------------
 from importlib.resources import files
 from pathlib import Path
-from textwrap import fill
 
 import arviz as az
 import matplotlib.dates as mdates
@@ -492,10 +491,26 @@ def out_of_sample_rmse(df_oos_reg_a: pd.DataFrame) -> pd.DataFrame:
     return rmse_region_quarters
 
 
-def plot_out_of_sample_rmse(df_a_r_oos: pd.DataFrame, path: Path | None = None):
-    df_prepped = prep_out_of_sample_data(df_a_r_oos)
-    rmse_region_quarters = out_of_sample_rmse(df_prepped)
-    R: int = len(rmse_region_quarters["region"].unique())
+def plot_out_of_sample_rmse(
+    df_results: pd.DataFrame, region_measure: str, path: Path | None = None
+):
+    df_regions = df_results.loc[(df_results["measure"] == region_measure), :].copy()
+    df_regions["error"] = df_regions.groupby(["datetime", "region", "measure"])[
+        "value"
+    ].diff(-1)
+    rmses_by_pub_gap = (
+        df_regions.dropna(subset="error")
+        .set_index("datetime")
+        .groupby(["region", "quarters_to_publication"])["error"]
+        .apply(lambda x: np.pow(x, 2))
+        .unstack()
+        .mean(axis=1)
+        .apply(np.sqrt)
+        .reset_index()
+        .rename(columns={0: "error"})
+    )
+
+    R: int = len(rmses_by_pub_gap["region"].unique())
     fig, axes = plt.subplots(
         int(np.floor(np.sqrt(R))),
         ncols=int(np.ceil(np.sqrt(R))),
@@ -504,12 +519,12 @@ def plot_out_of_sample_rmse(df_a_r_oos: pd.DataFrame, path: Path | None = None):
         sharey=True,
     )
     axes = axes.flatten()
-    for i, region in enumerate(rmse_region_quarters["region"].unique()):
-        res_here = rmse_region_quarters.loc[rmse_region_quarters["region"] == region]
+    for i, region in enumerate(rmses_by_pub_gap["region"].unique()):
+        res_here = rmses_by_pub_gap.loc[rmses_by_pub_gap["region"] == region]
         axes[i].scatter(res_here["quarters_to_publication"], res_here["error"])
         axes[i].set_ylabel(f"{region}")
         axes[i].set_xlim(7, 0)
-        axes[i].set_ylim(0, rmse_region_quarters["error"].max() * 1.3)
+        axes[i].set_ylim(0, rmses_by_pub_gap["error"].max() * 1.3)
         axes[i].xaxis.set_minor_locator(AutoMinorLocator(2))
         axes[i].yaxis.set_major_locator(AutoLocator())
         axes[i].yaxis.set_minor_locator(AutoMinorLocator(2))
@@ -526,110 +541,112 @@ def plot_out_of_sample_rmse(df_a_r_oos: pd.DataFrame, path: Path | None = None):
     plt.close()
 
 
-def prep_out_of_sample_data(df: pd.DataFrame) -> pd.DataFrame:
-    df_oos_reg_a_here = df.copy()
-    df_oos_reg_a_here = pd.melt(
-        df_oos_reg_a_here.reset_index(),
-        id_vars=["datetime", "nowcast_index", "type", "quarters_to_publication"],
-        var_name="region",
-        value_name="value",
-    )
-    df_oos_reg_a_here["error"] = df_oos_reg_a_here.groupby(
-        ["quarters_to_publication", "region", "datetime", "nowcast_index"]
-    )["value"].diff()
-    return df_oos_reg_a_here
-
-
 def plot_out_of_sample_nowcasts(
-    df_ests: pd.DataFrame,
-    df_original: pd.DataFrame,
+    df_results: pd.DataFrame,
     region_measure: str,
     path: Path | None = None,
 ):
-    df_oos_reg_a = prep_out_of_sample_data(df_ests)
-    datetimes_to_use = pd.Series(
-        df_original.loc[df_original["measure"] == region_measure, :]
-        .dropna(subset="value")["datetime"]
-        .unique()
+    df_regions = df_results.loc[(df_results["measure"] == region_measure), :].copy()
+    df_regions["error"] = df_regions.groupby(["datetime", "region", "measure"])[
+        "value"
+    ].diff(-1)
+    rmses_by_region = (
+        df_regions.dropna(subset="error")
+        .set_index("datetime")
+        .groupby(["region"])["error"]
+        .apply(lambda x: np.pow(x, 2))
+        .reset_index()
+        .groupby(["region"])["error"]
+        .mean()
+        .apply(np.sqrt)
     )
-    for region in df_oos_reg_a["region"].unique():
-        examine_df = (
-            df_oos_reg_a.loc[df_oos_reg_a["region"] == region, :]
-            .dropna(subset="value")
+    y_max = np.max(df_regions["value"]) * 1.1 * 100
+    for region in df_regions["region"].unique():
+        reg_df = df_regions.loc[(df_regions["region"] == region), :].copy()
+        reg_df["value"] = 100 * reg_df["value"]
+        reg_df_now = (
+            reg_df.loc[reg_df["type"] == "nowcast", :].sort_values(by="datetime").copy()
+        )
+        reg_df_out = reg_df.loc[reg_df["type"] == "outturn", :].copy()
+        reg_df_out = (
+            reg_df_out.loc[~reg_df_out["value"].isna(), :]
+            .sort_values(by="datetime")
             .copy()
         )
-        examine_df = examine_df.loc[
-            examine_df["datetime"].isin(datetimes_to_use)
+        datetimes_to_use = reg_df_out["datetime"].unique()
+        reg_df_now = reg_df_now.loc[
+            reg_df_now["datetime"].isin(datetimes_to_use), :
         ].copy()
+
         fig, ax = plt.subplots()
-        outturn = df_original.loc[
-            (
-                (df_original["measure"] == region_measure)
-                & (df_original["region"] == region)
-            ),
-            :,
-        ].dropna(subset="value")
-        examine_df["value"] = examine_df["value"] * 100.0
-        y_max = np.max(outturn["value"]) * 1.05
-        nowcast = examine_df.loc[examine_df["type"] == "nowcast", :]
+
         # Only plot year end nowcasts
         ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3, zorder=0)
-        ax.scatter(outturn["datetime"], outturn["value"] * 100, color=colour_wheel[1])
-        ax.annotate(
-            "Outturn",
-            xy=(outturn["datetime"].iloc[1], outturn["value"].iloc[1] * 100),
-            xytext=(10, 70),
-            textcoords="offset points",
-            fontsize=8,
-            arrowprops=dict(
-                arrowstyle="->",
-                color="0.5",
-                shrinkA=5,
-                shrinkB=5,
-                patchA=None,
-                patchB=None,
-                connectionstyle="arc3,rad=0.3",
-            ),
-        )
-        # Do a loop for the nowcasts with the lag-quarters out nowcast being more visible
-        num_qtrs_to_go = int(nowcast["quarters_to_publication"].max() + 1)
-        full_alpha = 0.9
-        for nowcast_idx in range(num_qtrs_to_go):
-            this_nowcast = nowcast.loc[
-                nowcast["quarters_to_publication"] == nowcast_idx
-            ]
+        if not reg_df_out.empty:
             ax.scatter(
-                this_nowcast["datetime"],
-                this_nowcast["value"],
-                color=colour_wheel[0],
-                marker="x",
-                alpha=full_alpha * ((nowcast_idx + 1) / num_qtrs_to_go),
+                reg_df_out["datetime"], reg_df_out["value"], color=colour_wheel[1]
             )
-        ax.annotate(
-            fill("Nowcasts\n(closer to publication = more transparent)", 30),
-            xy=(this_nowcast["datetime"].iloc[0], this_nowcast["value"].iloc[0]),
-            xytext=(20, -50),
-            va="top",
-            ha="right",
-            textcoords="offset points",
-            fontsize=8,
-            arrowprops=dict(
-                arrowstyle="->",
-                color="0.5",
-                shrinkA=5,
-                shrinkB=5,
-                patchA=None,
-                patchB=None,
-                connectionstyle="arc3,rad=0.3",
-            ),
-        )
+            ax.annotate(
+                "Outturn",
+                xy=(reg_df_out["datetime"].iloc[0], reg_df_out["value"].iloc[0]),
+                xytext=(10, 60),
+                textcoords="offset points",
+                fontsize=7,
+                arrowprops=dict(
+                    arrowstyle="->",
+                    color="0.5",
+                    shrinkA=5,
+                    shrinkB=5,
+                    patchA=None,
+                    patchB=None,
+                    connectionstyle="arc3,rad=0.3",
+                ),
+            )
+        # Do a loop for the nowcasts with the lag-quarters out nowcast being more visible
+        if not reg_df_now.empty:
+            num_qtrs_to_go = int(reg_df_now["quarters_to_publication"].max() + 1)
+            full_alpha = 0.9
+            for nowcast_idx in range(num_qtrs_to_go):
+                this_nowcast = reg_df_now.loc[
+                    reg_df_now["quarters_to_publication"] == nowcast_idx
+                ].sort_values(by="datetime")
+                if not this_nowcast.empty:
+                    ax.scatter(
+                        this_nowcast["datetime"],
+                        this_nowcast["value"],
+                        color=colour_wheel[0],
+                        marker="x",
+                        alpha=full_alpha * ((nowcast_idx + 1) / num_qtrs_to_go),
+                    )
+            if not this_nowcast.empty:
+                ax.annotate(
+                    "Nowcasts\n(closer to publication = more transparent)",
+                    xy=(
+                        this_nowcast["datetime"].iloc[0],
+                        this_nowcast["value"].iloc[0],
+                    ),
+                    xytext=(20, -50),
+                    va="top",
+                    ha="left",
+                    textcoords="offset points",
+                    fontsize=7,
+                    arrowprops=dict(
+                        arrowstyle="->",
+                        color="0.5",
+                        shrinkA=5,
+                        shrinkB=5,
+                        patchA=None,
+                        patchB=None,
+                        connectionstyle="arc3,rad=0.3",
+                    ),
+                )
         ax.xaxis.set_major_locator(mdates.YearLocator(base=5))
         ax.xaxis.set_minor_locator(mdates.YearLocator(base=1))
         ax.yaxis.set_major_locator(AutoLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator(5))
         ax.set_title(
-            f"Annual Growth Nowcast for {region}, %",
-            fontsize=14,
+            f"Out-of-sample nowcast for {region}, % growth\n(RMSE: {rmses_by_region[region]:.2f})",
+            fontsize=11,
             loc="left",
         )
         ax.set_ylim(-y_max, y_max)
@@ -782,43 +799,48 @@ def live_recession_indicator(
     return df
 
 
-def out_of_sample_classification_performance_table(df: pd.DataFrame) -> pd.DataFrame:
+def out_of_sample_classification_performance_table(
+    df_results: pd.DataFrame, region_measure: str, path: Path | None = None
+) -> pd.DataFrame:
     # Up or down classification performance
     # Compare the signs
-    df_oos_reg_a = prep_out_of_sample_data(df)
-    df_oos_reg_a["sign"] = df_oos_reg_a.groupby(
-        ["datetime", "region", "quarters_to_publication", "nowcast_index"]
+    df_region = df_results.loc[df_results["measure"] == region_measure, :].copy()
+    # Want to compare every nowcast to its original outturn
+    df_outturns_only = df_region.loc[df_region["type"] == "outturn"].drop(
+        ["measure", "quarters_to_publication", "nowcast_index"], axis=1
+    )
+    df_outturns_only = df_outturns_only.loc[~df_outturns_only["value"].isna(), :]
+    df_region["sign"] = df_region.groupby(
+        ["datetime", "region", "type", "quarters_to_publication"]
     )["value"].transform(np.sign)
 
-    df_oos_reg_a["correct"] = (
-        df_oos_reg_a.groupby(
-            ["quarters_to_publication", "region", "datetime", "nowcast_index"]
-        )["sign"]
-        .diff()
-        .map({0.0: True, 2.0: False})
+    df_merge = pd.merge(
+        df_region.loc[df_region["type"] != "outturn"],
+        df_outturns_only,
+        on=["datetime", "region"],
+        how="inner",
+        suffixes=("_nowcast", "_outturn"),
+    )
+    df_merge = df_merge.drop_duplicates(
+        subset=["region", "datetime", "quarters_to_publication"]
+    ).copy()
+
+    df_merge["agree"] = df_merge["value_nowcast"].apply(np.sign) == df_merge[
+        "value_outturn"
+    ].apply(np.sign)
+
+    df_merge["quarters_to_publication"] = df_merge["quarters_to_publication"].astype(
+        int
     )
 
-    # analyse signs compare
-    df_signs = df_oos_reg_a.dropna(subset="correct").copy()
-
-    # This one but as a table.
-    classifications = (
-        df_signs.dropna(subset="value")
-        .groupby(["quarters_to_publication", "region"])["correct"]
-        .agg(["sum", len])
+    summary_df = df_merge.groupby(["region", "quarters_to_publication"])["agree"].agg(
+        ["sum", "count"]
     )
-    classifications["sum"] = classifications["sum"].astype(int)
-
-    classifications["accuracy"] = classifications["sum"] / classifications["len"]
-    out_table = (
-        (classifications["accuracy"].unstack() * 100)
-        .astype("double")
-        .round(0)
-        # .astype(int)
-        .iloc[::-1, :]
+    summary_df["pct_accuracy"] = (100 * summary_df["sum"] / summary_df["count"]).round(
+        1
     )
-    out_table.index = out_table.index.astype(int).astype(str)
-    out_table.index.name = "Qs to publication"
-    out_table = out_table.T
-    out_table.index.name = "Qs to publication"
-    return out_table
+
+    summary_df = summary_df["pct_accuracy"].unstack()
+    if path:
+        summary_df.to_csv(path / "oos_classification_performance.csv")
+    return summary_df
