@@ -31,7 +31,7 @@ def test_vanilla_run(mock_show) -> None:
 
     # Then users runs the following:
 
-    fab_model = Ambric(
+    amb = Ambric(
         df_as_if_real,
         macro_names,
         region_names,
@@ -39,7 +39,7 @@ def test_vanilla_run(mock_show) -> None:
         n_factors=n_factors,
     )
 
-    logger.info("Ambric model created with ID: " + fab_model.model_id)
+    logger.info("Ambric model created with ID: " + amb.model_id)
 
     n_its = 1000
     n_posterior_samples = 3000
@@ -48,20 +48,20 @@ def test_vanilla_run(mock_show) -> None:
         f"Fitting Ambric model with {n_its} iterations and {n_posterior_samples} posterior samples"
     )
 
-    fab_model.fit(
+    amb.fit(
         n_model_fit_iterations=n_its,
         n_posterior_samples=n_posterior_samples,
     )
 
     logger.info("Ambric model fit complete")
 
-    fab_model.plot_national_quarterly_vs_implied()
-    fab_model.plot_regional_annual_estimate()
-    fab_model.plot_single_region_annual_estimate(region_name="region_00")
-    fab_model.plot_estimated_regional_quarterly()
-    fab_model.plot_current_nowcast()
-    fab_model.live_recession_indicator()
-    fab_model.live_point_estimates()
+    amb.plot_national_quarterly_vs_implied()
+    amb.plot_regional_annual_estimate()
+    amb.plot_single_region_annual_estimate(region_name="region_00")
+    amb.plot_estimated_regional_quarterly()
+    amb.plot_current_nowcast()
+    amb.live_recession_indicator()
+    amb.live_point_estimates()
     mock_show.assert_called()
 
 

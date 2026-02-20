@@ -411,17 +411,17 @@ def fit_bridge_equation(
         )
         theta_opt = result.x
         midas_weights = _almon_weights(theta_opt[0], theta_opt[1], n_lags=4)
-        logger.info(
+        logger.debug(
             f"Bridge equation: Estimated Almon params theta=({theta_opt[0]:.4f}, {theta_opt[1]:.4f})"
         )
-        logger.info(
+        logger.debug(
             f"Bridge equation: MIDAS weights = [{', '.join(f'{w:.4f}' for w in midas_weights)}] "
             f"(Q1->Q4)"
         )
     else:
         theta_opt = None
         midas_weights = np.ones(4) / 4.0
-        logger.info("Bridge equation: Using equal (U-MIDAS) weights.")
+        logger.debug("Bridge equation: Using equal (U-MIDAS) weights.")
 
     # --- Fit bridge regression with chosen weights ---
     X_bridge_rows = []
@@ -453,9 +453,9 @@ def fit_bridge_equation(
     betas = bridge_reg.coef_[1:]
     intercept = bridge_reg.intercept_
 
-    logger.info(f"Bridge equation: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
-    logger.info(f"Bridge equation: delta (XGBoost loading) = {delta:.4f}")
-    logger.info(f"Bridge equation: intercept = {intercept:.4f}")
+    logger.info(f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
+    logger.info(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
+    logger.info(f"Bridge: intercept = {intercept:.4f}")
 
     # --- Construct quarterly signal s_{t,r} ---
     quarterly_signal = np.zeros((T, R))
@@ -705,7 +705,9 @@ class Ambric:
             aggregation_region=aggregation_region,
             region_measure=region_measure,
         )
-
+        self.aggregate_measure = aggregate_measure
+        self.aggregation_region = aggregation_region
+        self.region_measure = region_measure
         self.df = df.copy()
         self.y_uk: npt.NDArray[np.float64] = y_uk
         self.y_annual: npt.NDArray[np.float64] = y_annual
@@ -734,16 +736,14 @@ class Ambric:
             f"Model ID: {self.model_id}\n"
             f"Parameters:\n"
             f"   Time periods (quarters), T={self.y_uk.shape[0]}\n"
+            f"   Earliest: {self.datetime_ts.min().strftime('%Y-%B')}; Latest: {self.datetime_ts.max().strftime('%Y-%B')}\n"
             f"   Regions, R={self.y_annual.shape[1]}\n"
             f"   Macroeconomic series, M={self.macro.shape[1]}\n"
             f"   Regional indicators, J={len(self.Z_panel)}\n"
             f"   n_factors={self.n_factors}\n"
         )
         if self.bridge_info is not None:
-            out_string += (
-                f"   Bridge R²={self.bridge_info['bridge_r2']:.4f}, "
-                f"delta={self.bridge_info['delta']:.4f}\n"
-            )
+            out_string += f"   Bridge R²={self.bridge_info['bridge_r2']:.4f}, "
         if self.trace:
             out_string += (
                 f"Model fitted: Yes\n"
@@ -776,7 +776,6 @@ class Ambric:
         self,
         n_model_fit_iterations: int = 200000,
         n_posterior_samples: int = 3000,
-        output_dir: Path | None = None,
         xgb_params: dict | None = None,
         bridge_use_almon: bool = True,
         bridge_ridge_alpha: float = 1.0,
@@ -860,10 +859,10 @@ class Ambric:
             )
             self.trace: az.InferenceData = inference.sample(n_posterior_samples)
 
-        if output_dir is not None:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            graph = pm.model_to_graphviz(self.model)
-            graph.render(output_dir / "model_diagram", format="pdf", cleanup=True)
+        # For devs: can save model diagram using the below
+        # (depends on graphviz)
+        # graph = pm.model_to_graphviz(self.model)
+        # graph.render("model_diagram", format="pdf", cleanup=True)
 
         return self
 
@@ -881,16 +880,39 @@ class Ambric:
         self.trace.to_netcdf(f"{path}/model_trace_{self.model_id}.nc")
         logger.info(f"Model trace saved to {path}/model_trace_{self.model_id}.nc")
 
-    def load_trace(self, path: str | Path) -> None:
-        """Loads the model trace from a NetCDF file.
-        NOT YET IMPLEMENTED.
+    def populate_results(self) -> pd.DataFrame:
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before saving the trace."
+            )
+        y_q_uk_est_point, _, y_a_r_est_point = trace_to_series(self.trace)
 
-        Args:
-            path (str | Path): Path to load the trace file from
-        """
-        logger.error("Not currently implemented!")
-        self.trace = az.from_netcdf(f"{path}/model_trace_{self.model_id}.nc")
-        logger.info(f"Model trace loaded from {path}/model_trace_{self.model_id}.nc")
+        annual_regional_ests = pd.DataFrame(
+            index=self.datetime_ts, columns=self.region_names, data=y_a_r_est_point
+        )
+        annual_regional_long_est = pd.melt(
+            annual_regional_ests.reset_index(), id_vars="datetime", var_name="region"
+        )
+        annual_regional_long_est["type"] = "nowcast"
+        annual_regional_long_est["measure"] = self.region_measure
+        annual_national_ests = pd.DataFrame(
+            index=self.datetime_ts,
+            data=y_q_uk_est_point,
+            columns=[self.aggregation_region],
+        )
+        annual_national_ests_long = pd.melt(
+            annual_national_ests.reset_index(), id_vars="datetime", var_name="region"
+        )
+        annual_national_ests_long["type"] = "nowcast"
+        annual_national_ests_long["measure"] = self.aggregate_measure
+        xf = self.df.loc[
+            self.df["measure"].isin([self.aggregate_measure, self.region_measure]), :
+        ].copy()
+        xf["type"] = "outturn"
+        results_df = pd.concat(
+            [xf, annual_regional_long_est, annual_national_ests_long], axis=0
+        )
+        return results_df
 
     def plot_national_quarterly_vs_implied(
         self, path: str | Path | None = None
@@ -1138,7 +1160,7 @@ def run_out_of_sample_exercise(
             filter,
             "value",
         ] = np.nan
-        fab_model = Ambric(
+        amb = Ambric(
             this_df,
             macro_names,
             region_names,
@@ -1149,13 +1171,13 @@ def run_out_of_sample_exercise(
             region_measure=region_measure,
         )
 
-        logger.info("Ambric model created with ID: " + fab_model.model_id)
+        logger.info("Ambric model created with ID: " + amb.model_id)
 
         logger.info(
             f"Fitting Ambric model with {n_its} iterations and {n_posterior_samples} posterior samples"
         )
 
-        fab_model.fit(
+        amb.fit(
             n_model_fit_iterations=n_its,
             n_posterior_samples=n_posterior_samples,
         )
@@ -1163,15 +1185,13 @@ def run_out_of_sample_exercise(
         logger.info("Ambric model fit complete")
 
         # Extract estimates
-        y_q_uk_est_point, y_q_r_est_point, y_a_r_est_point = trace_to_series(
-            fab_model.trace
-        )
+        y_q_uk_est_point, y_q_r_est_point, y_a_r_est_point = trace_to_series(amb.trace)
 
         # Check that the model really didn't have access to the oos
         # annual numbers
-        assert np.all(np.isnan(fab_model.y_annual[start_segment_oos:end_segment, :]))
+        assert np.all(np.isnan(amb.y_annual[start_segment_oos:end_segment, :]))
         # known answer unseen by model
-        rmse_national_q = rmse_national_quarterly(fab_model.y_uk, y_q_uk_est_point)
+        rmse_national_q = rmse_national_quarterly(amb.y_uk, y_q_uk_est_point)
         # Out of sample annual rmse
 
         y_a_r_est_point_realtime = y_a_r_est_point[-lag_qtrs:, :].copy()
@@ -1207,7 +1227,7 @@ def run_out_of_sample_exercise(
 
         df_annual_regional = pd.concat([df_annual_regional, df_ar_here], axis=0)
 
-        df_uk_q_here = pd.DataFrame(data=fab_model.y_uk, columns=pd.Index(["outturn"]))
+        df_uk_q_here = pd.DataFrame(data=amb.y_uk, columns=pd.Index(["outturn"]))
         df_uk_q_here.index = datetimes_this_wedge
         df_uk_q_here["nowcast"] = y_q_uk_est_point
         # cut only to the regional data oos period
