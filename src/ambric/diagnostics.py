@@ -299,9 +299,11 @@ def plot_regional_annual_estimate(
     )
 
     R: int = np.shape(y_annual_est)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(20, 10),
         sharex=True,
         sharey=True,
@@ -326,12 +328,14 @@ def plot_regional_annual_estimate(
         axes[i].scatter(datetime_ts, y_annual_true[:, r], **true_settings)
         axes[i].plot(datetime_ts, y_annual_est[:, r], **estimate_settings)
         axes[i].set_ylabel(f"{region_names[i]}")
-        if r == 4:
+        if i == 0:
             axes[i].legend(loc="best")
         axes[i].set_ylim(-y_lim, y_lim)
         axes[i].xaxis.set_minor_locator(mdates.YearLocator())
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
-        f"Annual q-on-4q Regional Growth: True vs Estimated (mean RMSE: {rmse_regional_a[i]:.3f})"
+        f"Annual q-on-4q Regional Growth: True vs Estimated (mean RMSE: {np.mean(rmse_regional_a):.3f})"
     )
     fig.autofmt_xdate()
     plt.tight_layout()
@@ -440,9 +444,11 @@ def plot_estimated_regional_quarterly(
 ):
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     R: int = np.shape(y_reg_est)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -462,6 +468,8 @@ def plot_estimated_regional_quarterly(
             lw=0.5,
             zorder=0,
         )
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
         "Regional Q-on-Q Growth Estimates",
         fontsize=14,
@@ -472,6 +480,7 @@ def plot_estimated_regional_quarterly(
         plt.savefig(Path(path) / "AMBRIC_quarterly_regional.svg")
     else:
         plt.show()
+    plt.close()
 
 
 # -----------------------------------------------------------------------------
@@ -638,8 +647,8 @@ def plot_loadings_by_region(
         loading_order.extend(names)
 
     n_loadings = len(loading_order)
-    n_rows = int(np.floor(np.sqrt(R)))
     n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     panel_height = max(3.5, n_loadings * 0.55 + 1.0)
 
     fig, axes = plt.subplots(
@@ -859,9 +868,11 @@ def plot_out_of_sample_rmse(
     )
 
     R: int = len(rmses_by_pub_gap["region"].unique())
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -876,6 +887,8 @@ def plot_out_of_sample_rmse(
         axes[i].xaxis.set_minor_locator(AutoMinorLocator(2))
         axes[i].yaxis.set_major_locator(AutoLocator())
         axes[i].yaxis.set_minor_locator(AutoMinorLocator(2))
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
         "Out-of-sample regional growth RMSEs: lower is better but we care most about the first estimate",
     )
@@ -1022,9 +1035,11 @@ def plot_current_nowcast(
     t_y_annual = y_annual[-backlook_qtrs:, :].copy()
     t_datetime_ts = datetime_ts.iloc[-backlook_qtrs:].copy()
     R: int = np.shape(y_nowcast)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -1053,6 +1068,8 @@ def plot_current_nowcast(
         axes[i].set_ylabel(f"{region_names[i]}")
         axes[i].set_ylim(-y_lim, y_lim)
         axes[i].xaxis.set_minor_locator(mdates.YearLocator())
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle("Nowcast: Regional Annual Growth")
     fig.autofmt_xdate()
     plt.tight_layout()
@@ -1158,9 +1175,6 @@ def out_of_sample_classification_performance_table(
         ["measure", "quarters_to_publication", "nowcast_index"], axis=1
     )
     df_outturns_only = df_outturns_only.loc[~df_outturns_only["value"].isna(), :]
-    df_region["sign"] = df_region.groupby(
-        ["datetime", "region", "type", "quarters_to_publication"]
-    )["value"].transform(np.sign)
 
     df_merge = pd.merge(
         df_region.loc[df_region["type"] != "outturn"],

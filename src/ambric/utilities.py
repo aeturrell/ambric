@@ -132,23 +132,24 @@ def prep_data_for_model_run(
     """
     logger.info("Prepping data for model run.")
     # Data checks
-    try:
-        all(
-            [
-                x in df["measure"].unique()
-                for x in macro_names
-                + region_covariate_names
-                + [aggregate_measure]
-                + [region_measure]
-            ]
-        )
-    except KeyError:
-        raise KeyError("One or more input measures not found in the data")
+    available_measures = set(df["measure"].unique())
+    missing_measures = [
+        x
+        for x in macro_names
+        + region_covariate_names
+        + [aggregate_measure]
+        + [region_measure]
+        if x not in available_measures
+    ]
+    if missing_measures:
+        raise KeyError(f"Measures not found in the data: {missing_measures}")
 
-    try:
-        all([x in df["region"] for x in region_names + [aggregation_region]])
-    except KeyError:
-        raise KeyError("One or more input regions not found in the data")
+    available_regions = set(df["region"].unique())
+    missing_regions = [
+        x for x in region_names + [aggregation_region] if x not in available_regions
+    ]
+    if missing_regions:
+        raise KeyError(f"Regions not found in the data: {missing_regions}")
 
     y_uk_extracted: npt.NDArray[np.float64] = df.loc[
         ((df["measure"] == aggregate_measure) & (df["region"] == aggregation_region)),
@@ -266,9 +267,3 @@ def simulate_real_time_data(
     for t in range(T - 1, T - annnual_regional_lag_qrtrs, -1):
         y_annual[t, :] = np.nan
     return y_uk, y_annual, y_reg_true, Z_panel, macro, y_annual_no_lags
-
-
-def simulate_real_time_data_in_dataframe(
-    T=80, R=6, J=3, n_factors=2, n_macro=2, annnual_regional_lag_qrtrs=6, seed=42
-):
-    """Simulate real-time data and return as a long-format dataframe."""

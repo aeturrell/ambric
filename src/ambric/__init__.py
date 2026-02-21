@@ -1,5 +1,5 @@
 """
-BRAMBLE — Bayesian Regional Augmented Machine-Bridged Latent Estimation
+AMBRIC — Augmented Mixed-frequency Bayesian Regional Inference with Constraints
 -------------------------------------------
 A Bayesian state-space model for estimating latent regional growth from
 sparse and temporally misaligned observations. Integrates
@@ -652,7 +652,7 @@ def build_ambric_model(
 
 
 class Ambric:
-    """Constrained Bayesian Latent Trees model.
+    """Augmented Mixed-frequency Bayesian Regional Inference with Constraints.
 
     Combines factor-analytic Bayesian state-space inference with XGBoost-driven
     predictions via a MIDAS bridge equation for regional nowcasting.
@@ -895,8 +895,9 @@ class Ambric:
                 "Model trace is not available. Fit the model before saving the trace."
             )
 
-        self.trace.to_netcdf(f"{path}/model_trace_{self.model_id}.nc")
-        logger.info(f"Model trace saved to {path}/model_trace_{self.model_id}.nc")
+        save_path = Path(path) / f"model_trace_{self.model_id}.nc"
+        self.trace.to_netcdf(save_path)
+        logger.info(f"Model trace saved to {save_path}")
 
     def populate_results(self) -> pd.DataFrame:
         """Returns results from model estimation, and original data, in format:
@@ -913,7 +914,7 @@ class Ambric:
         """
         if self.trace is None:
             raise ValueError(
-                "Model trace is not available. Fit the model before saving the trace."
+                "Model trace is not available. Fit the model before populating results."
             )
         y_q_uk_est_point, _, y_a_r_est_point = trace_to_series(self.trace)
 
@@ -1257,16 +1258,16 @@ def run_out_of_sample_exercise(
         )
         # Prepare data for model run. Only take entries to the end of the segment.
         df_it = df.loc[df["datetime"] <= datetime_spine.iloc[T_it]].copy()
-        # Create a filter for those values that will be masked because
+        # Create a mask for those values that will be masked because
         # we wish to attempt to predict them
-        filter = (
+        oos_mask = (
             (df_it["region"].isin(region_names))
             & (df_it["measure"] == region_measure)
             & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos])
         )
         # Block the annual regional data that has yet to be observed
         df_it_masked = df_it.copy()
-        df_it_masked.loc[filter, "value"] = np.nan
+        df_it_masked.loc[oos_mask, "value"] = np.nan
         amb = Ambric(
             df_it_masked,
             macro_names=macro_names,
