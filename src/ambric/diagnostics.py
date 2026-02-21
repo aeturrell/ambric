@@ -68,7 +68,7 @@ def rmse_regions_quarterly(
     ]
     logger.info("RMSE (true vs estimated) per region (quarterly):")
     for r in range(R):
-        logger.info(f"  Region {r+1}: {rmses[r]:.4f}")
+        logger.info(f"  Region {r + 1}: {rmses[r]:.4f}")
     logger.info(f"  Average: {np.mean(rmses):.4f}")
     return rmses
 
@@ -95,7 +95,7 @@ def rmse_regions_annual(
     ]
     logger.info("RMSE (true vs estimated) per region (annual):")
     for r in range(R):
-        logger.info(f"  Region {r+1}: {rmses[r]:.4f}")
+        logger.info(f"  Region {r + 1}: {rmses[r]:.4f}")
     logger.info(f"  Average: {np.mean(rmses):.4f}")
     return rmses
 
@@ -308,7 +308,7 @@ def plot_regional_annual_estimate(
     )
     axes = axes.flatten()
     y_lim = np.max(y_annual_est) * 1.2
-    y_lim = float(f"{float(f'{y_lim*1.3:.{2}g}'):g}")
+    y_lim = float(f"{float(f'{y_lim * 1.3:.{2}g}'):g}")
     for i, r in enumerate(range(R)):
         axes[i].axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
         colours_here = colour_bands.loc[colour_bands["region"] == region_names[i]]
@@ -356,7 +356,7 @@ def plot_single_region_annual_estimate(
         figsize=(14, 6),
     )
     y_lim = np.nanmax(y_annual_est) * 1.2
-    y_lim = float(f"{float(f'{y_lim*1.3:.{2}g}'):g}")
+    y_lim = float(f"{float(f'{y_lim * 1.3:.{2}g}'):g}")
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
     ax.scatter(
         datetime_ts,
@@ -472,6 +472,354 @@ def plot_estimated_regional_quarterly(
         plt.savefig(Path(path) / "AMBRIC_quarterly_regional.svg")
     else:
         plt.show()
+
+
+# -----------------------------------------------------------------------------
+# Loadings Diagnostics
+# -----------------------------------------------------------------------------
+
+_BROAD_TYPE_ORDER: list[str] = ["factors", "macro", "boost_signal"]
+_BROAD_TYPE_COLOURS: dict[str, str] = {
+    "factors": colour_wheel[5],
+    "macro": colour_wheel[3],
+    "boost_signal": colour_wheel[7],
+}
+
+
+def assemble_loadings_data(
+    trace: az.InferenceData,
+    region_names: list[str],
+    macro_names: list[str] | None = None,
+) -> pd.DataFrame:
+    """Assemble estimated loadings from the posterior into a long-format DataFrame.
+
+    Extracts factor loadings (Lambda), macro loadings (Gamma), and bridge
+    signal loadings (delta_r) from the posterior, returning the posterior
+    mean and 94 % HDI bounds for every loading-region combination.
+
+    Three broad loading types are distinguished:
+
+    - ``"factors"``: Lambda loadings mapping common factors to each region.
+    - ``"macro"``: Gamma loadings mapping macro series to each region.
+    - ``"boost_signal"``: delta_r loadings scaling the XGBoost bridge signal
+      per region.
+
+    Args:
+        trace (az.InferenceData): Posterior samples as returned by
+            :meth:`~ambric.Ambric.fit`.
+        region_names (list[str]): Names of the R regions in the same order
+            used when fitting the model.
+        macro_names (list[str] | None): Names of the M macro series in model
+            order.  When ``None``, generic labels ``"macro_0"``,
+            ``"macro_1"``, … are used.
+
+    Returns:
+        pd.DataFrame: Long-format frame with columns:
+
+            - ``region`` (str) – region name.
+            - ``loading_name`` (str) – individual loading label, e.g.
+              ``"factor_0"``, ``"macro_gdp"``, ``"boost_signal"``.
+            - ``broad_type`` (str) – one of ``"factors"``, ``"macro"``,
+              ``"boost_signal"``.
+            - ``mean`` (float) – posterior mean of the loading.
+            - ``hdi_low`` (float) – lower bound of the 94 % HDI.
+            - ``hdi_high`` (float) – upper bound of the 94 % HDI.
+    """
+    rows: list[dict] = []
+
+    # --- Factor loadings: Lambda has shape (R, K) in the model ---
+    lambda_mean: npt.NDArray[np.float64] = (
+        trace.posterior["Lambda"].mean(dim=("chain", "draw")).values
+    )  # (R, K)
+    lambda_hdi: npt.NDArray[np.float64] = az.hdi(
+        trace, var_names=["Lambda"], hdi_prob=0.94
+    )["Lambda"].values  # (R, K, 2)
+    K: int = lambda_mean.shape[1]
+
+    for r, region in enumerate(region_names):
+        for k in range(K):
+            rows.append(
+                {
+                    "region": region,
+                    "loading_name": f"factor_{k}",
+                    "broad_type": "factors",
+                    "mean": float(lambda_mean[r, k]),
+                    "hdi_low": float(lambda_hdi[r, k, 0]),
+                    "hdi_high": float(lambda_hdi[r, k, 1]),
+                }
+            )
+
+    # --- Macro loadings: Gamma has shape (R, M) in the model ---
+    gamma_mean: npt.NDArray[np.float64] = (
+        trace.posterior["Gamma"].mean(dim=("chain", "draw")).values
+    )  # (R, M)
+    gamma_hdi: npt.NDArray[np.float64] = az.hdi(
+        trace, var_names=["Gamma"], hdi_prob=0.94
+    )["Gamma"].values  # (R, M, 2)
+    M: int = gamma_mean.shape[1]
+
+    resolved_macro_names: list[str] = (
+        macro_names if macro_names is not None else [f"macro_{m}" for m in range(M)]
+    )
+    for r, region in enumerate(region_names):
+        for m, name in enumerate(resolved_macro_names):
+            rows.append(
+                {
+                    "region": region,
+                    "loading_name": name,
+                    "broad_type": "macro",
+                    "mean": float(gamma_mean[r, m]),
+                    "hdi_low": float(gamma_hdi[r, m, 0]),
+                    "hdi_high": float(gamma_hdi[r, m, 1]),
+                }
+            )
+
+    # --- Bridge signal loadings: delta_r has shape (R,) in the model ---
+    delta_mean: npt.NDArray[np.float64] = (
+        trace.posterior["delta_r"].mean(dim=("chain", "draw")).values
+    )  # (R,)
+    delta_hdi: npt.NDArray[np.float64] = az.hdi(
+        trace, var_names=["delta_r"], hdi_prob=0.94
+    )["delta_r"].values  # (R, 2)
+
+    for r, region in enumerate(region_names):
+        rows.append(
+            {
+                "region": region,
+                "loading_name": "boost_signal",
+                "broad_type": "boost_signal",
+                "mean": float(delta_mean[r]),
+                "hdi_low": float(delta_hdi[r, 0]),
+                "hdi_high": float(delta_hdi[r, 1]),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    logger.info(
+        f"Assembled loadings data: {len(df)} rows across "
+        f"{len(region_names)} regions, "
+        f"broad types: {df['broad_type'].unique().tolist()}"
+    )
+    return df
+
+
+def plot_loadings_by_region(
+    loadings_df: pd.DataFrame,
+    region_names: list[str],
+    path: Path | None = None,
+) -> None:
+    """Plot estimated loadings for each region as a horizontal dot chart.
+
+    One panel per region is arranged in a square grid.  Within each panel
+    every loading—factor, macro, and boost-signal—is drawn as a dot with
+    94 % HDI error bars and coloured by its broad loading type, so the
+    three signal categories can be compared at a glance within and across
+    regions.
+
+    Args:
+        loadings_df (pd.DataFrame): Output of :func:`assemble_loadings_data`.
+            Must contain columns ``region``, ``loading_name``,
+            ``broad_type``, ``mean``, ``hdi_low``, ``hdi_high``.
+        region_names (list[str]): Ordered list of region names that
+            determines the panel layout.
+        path (Path | None): Directory in which to save the figure as an
+            SVG.  When ``None`` the figure is shown interactively.
+    """
+    R = len(region_names)
+
+    # Canonical order: factors → macro → boost_signal.
+    loading_order: list[str] = []
+    for bt in _BROAD_TYPE_ORDER:
+        names = (
+            loadings_df.loc[loadings_df["broad_type"] == bt, "loading_name"]
+            .unique()
+            .tolist()
+        )
+        loading_order.extend(names)
+
+    n_loadings = len(loading_order)
+    n_rows = int(np.floor(np.sqrt(R)))
+    n_cols = int(np.ceil(np.sqrt(R)))
+    panel_height = max(3.5, n_loadings * 0.55 + 1.0)
+
+    fig, axes = plt.subplots(
+        n_rows,
+        ncols=n_cols,
+        figsize=(5 * n_cols, panel_height * n_rows),
+        sharex=True,
+        sharey=True,
+    )
+    axes = axes.flatten()
+
+    y_positions = np.arange(n_loadings)
+
+    for i, region in enumerate(region_names):
+        ax = axes[i]
+        region_df = (
+            loadings_df[loadings_df["region"] == region]
+            .copy()
+            .assign(
+                loading_name=lambda d: pd.Categorical(
+                    d["loading_name"], categories=loading_order, ordered=True
+                )
+            )
+            .sort_values("loading_name")
+            .reset_index(drop=True)
+        )
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
+
+        for j, (_, row) in enumerate(region_df.iterrows()):
+            colour = _BROAD_TYPE_COLOURS.get(row["broad_type"], colour_wheel[0])
+            ax.errorbar(
+                x=row["mean"],
+                y=y_positions[j],
+                xerr=[
+                    [row["mean"] - row["hdi_low"]],
+                    [row["hdi_high"] - row["mean"]],
+                ],
+                fmt="o",
+                color=colour,
+                markersize=5,
+                capsize=3,
+                lw=1.2,
+                alpha=0.85,
+            )
+
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(region_df["loading_name"].tolist(), fontsize=8)
+        ax.set_title(region, fontsize=9, pad=2)
+
+        if i == 0:
+            handles = [
+                ax.scatter(
+                    [],
+                    [],
+                    color=_BROAD_TYPE_COLOURS[bt],
+                    s=30,
+                    label=bt.replace("_", " ").title(),
+                )
+                for bt in _BROAD_TYPE_ORDER
+                if bt in loadings_df["broad_type"].values
+            ]
+            ax.legend(handles=handles, fontsize=7, loc="best")
+
+    # Hide unused grid cells when R is not a perfect square.
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
+
+    plt.suptitle("Estimated Loadings by Region (94 % HDI)", fontsize=13)
+    plt.tight_layout()
+    if path is not None:
+        plt.savefig(Path(path) / "AMBRIC_loadings_by_region.svg")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_loadings_aggregate(
+    loadings_df: pd.DataFrame,
+    path: Path | None = None,
+) -> None:
+    """Plot loading distributions across regions, grouped by broad type.
+
+    One panel per broad loading type (factors, macro, boost_signal) appears
+    side-by-side.  Within each panel every loading name has one dot per
+    region, arranged with a small vertical jitter for legibility.  A
+    prominently outlined dot marks the cross-region mean, making it easy to
+    compare the relative magnitude of different signal types and to spot
+    regions that deviate from the consensus.
+
+    Args:
+        loadings_df (pd.DataFrame): Output of :func:`assemble_loadings_data`.
+            Must contain columns ``region``, ``loading_name``,
+            ``broad_type``, ``mean``, ``hdi_low``, ``hdi_high``.
+        path (Path | None): Directory in which to save the figure as an
+            SVG.  When ``None`` the figure is shown interactively.
+    """
+    broad_types_present = [
+        bt for bt in _BROAD_TYPE_ORDER if bt in loadings_df["broad_type"].values
+    ]
+    n_panels = len(broad_types_present)
+    n_loadings_max = max(
+        loadings_df[loadings_df["broad_type"] == bt]["loading_name"].nunique()
+        for bt in broad_types_present
+    )
+    panel_height = max(4.0, n_loadings_max * 0.7 + 1.0)
+
+    fig, axes = plt.subplots(
+        1,
+        n_panels,
+        figsize=(6 * n_panels, panel_height),
+        sharey=False,
+        sharex=False,
+    )
+    # Ensure axes is always a list for uniform indexing.
+    axes_list: list = [axes] if n_panels == 1 else list(axes)
+
+    n_regions = loadings_df["region"].nunique()
+
+    for panel_idx, broad_type in enumerate(broad_types_present):
+        ax = axes_list[panel_idx]
+        subset = loadings_df[loadings_df["broad_type"] == broad_type].copy()
+
+        # Order loading names by descending absolute cross-region mean so the
+        # most influential loadings appear at the top.
+        loading_names: list[str] = (
+            subset.groupby("loading_name")["mean"]
+            .mean()
+            .abs()
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
+
+        jitter = np.linspace(-0.3, 0.3, n_regions) if n_regions > 1 else np.array([0.0])
+        colour = _BROAD_TYPE_COLOURS[broad_type]
+
+        for y_pos, loading_name in enumerate(loading_names):
+            rows = subset[subset["loading_name"] == loading_name].reset_index(drop=True)
+            # Individual region dots, semi-transparent.
+            for reg_idx, (_, row) in enumerate(rows.iterrows()):
+                ax.scatter(
+                    row["mean"],
+                    y_pos + jitter[reg_idx],
+                    color=colour,
+                    alpha=0.4,
+                    s=22,
+                    zorder=2,
+                )
+
+            # Cross-region mean as a prominent outlined dot.
+            cross_mean = float(rows["mean"].mean())
+            ax.scatter(
+                cross_mean,
+                y_pos,
+                color=colour,
+                s=80,
+                edgecolor="k",
+                lw=0.8,
+                zorder=4,
+                alpha=0.95,
+            )
+
+        ax.set_yticks(range(len(loading_names)))
+        ax.set_yticklabels(loading_names, fontsize=9)
+        ax.set_title(broad_type.replace("_", " ").title(), fontsize=11)
+        ax.set_xlabel("Loading value")
+
+    plt.suptitle(
+        "Comparative Loadings by Broad Type\n"
+        "(small dots = individual regions,  large dot = cross-region mean)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    if path is not None:
+        plt.savefig(Path(path) / "AMBRIC_loadings_aggregate.svg")
+    else:
+        plt.show()
+    plt.close()
 
 
 # Out of sample results diagnostics from here
