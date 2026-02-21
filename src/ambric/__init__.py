@@ -149,7 +149,7 @@ def impute_panel(
 
 
 def extract_factors_from_panel(
-    Z_panel: list[npt.NDArray], n_factors: int, standardise=True
+    Z_panel: list[npt.NDArray], n_factors: int, standardise: bool = True
 ) -> npt.NDArray[np.float64]:
     """Extract common factors from regional indicator panels via Factor Analysis.
 
@@ -813,7 +813,6 @@ class Ambric:
         Args:
             n_model_fit_iterations: Number of ADVI iterations.
             n_posterior_samples: Number of posterior samples to draw.
-            output_dir: Directory for output files (model diagram, etc.).
             xgb_params: Optional XGBoost hyperparameters override.
             bridge_use_almon: Use Almon polynomial for MIDAS weights.
             bridge_ridge_alpha: Ridge regularisation for bridge equation.
@@ -1149,17 +1148,26 @@ class Ambric:
         logger.info("Plotted loadings in aggregate by broad type.")
 
     def live_recession_indicator(self, path: Path | None = None) -> pd.DataFrame:
-        """Produces a table giving nowcast indicating growth vs recession by region. Quarterly frequency but q on 4q estimates
+        """Produce a table indicating growth vs recession by region.
+
+        Uses q-on-4q annual growth estimates at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
 
         Raises:
             ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the classification.
         """
         if self.trace is None:
             raise ValueError(
                 "Model trace is not available. Fit the model before calling this method."
             )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
-        # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
         out_table = live_recession_indicator(
             y_a_r_est_point,
             region_names=self.region_names,
@@ -1171,17 +1179,27 @@ class Ambric:
         return out_table
 
     def live_point_estimates(self, path: Path | None = None) -> pd.DataFrame:
-        """Produces a table giving nowcast point estimates by region. Quarterly frequency but q_on_4q estimates.
+        """Produce a table of nowcast point estimates by region.
+
+        Returns q-on-4q annual growth estimates (in percentage points,
+        rounded to 2 d.p.) at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
 
         Raises:
             ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the point estimate.
         """
         if self.trace is None:
             raise ValueError(
                 "Model trace is not available. Fit the model before calling this method."
             )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
-        # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
         df = (
             pd.DataFrame(
                 y_a_r_est_point,
@@ -1208,30 +1226,33 @@ def run_out_of_sample_exercise(
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
-    n_its=100000,
-    n_posterior_samples=3000,
+    n_its: int = 100000,
+    n_posterior_samples: int = 3000,
 ) -> pd.DataFrame:
     """Run out-of-sample exercise to evaluate model performance.
 
-    Masks the most recent annual regional data by `lag_qtrs` quarters and fits the model in chunks. End scores for the out-of-sample period for annual regional estimates are recorded and returned.
+    Masks the most recent annual regional data by ``lag_qtrs`` quarters
+    and fits the model in rolling chunks.  Out-of-sample nowcasts and
+    outturns for each step are collected and returned.
 
     Args:
         df (pd.DataFrame): Dataframe containing relevant columns.
         macro_names (list[str]): Names of macro series.
         region_names (list[str]): Names of regions.
         region_covariate_names (list[str]): Names of by-region covariates.
-        n_factors (int, optional): Factors. Defaults to 4.
-        aggregate_measure (str, optional): Nation-wide measure. Defaults to "gva_q_on_q".
-        aggregation_region (str, optional): Top level geography. Defaults to "uk".
-        region_measure (str, optional): Growth measure regional. Defaults to "gva_q_on_4q".
-        no_steps (int, optional): How many chunks to perform out of sample exercise in. Defaults to 4.
-        init_chunk_size (int, optional): Initial learning window size. Defaults to 20.
-        lag_qtrs (int, optional): How many quarters before the data are published. Defaults to 6.
-        n_its (int, optional): Iterations of ADVI for Bayesian inference. Defaults to 100000.
-        n_posterior_samples (int, optional): Samples of the posterior. Defaults to 3000.
+        n_factors (int): Number of factors. Defaults to 4.
+        aggregate_measure (str): Nation-wide measure. Defaults to "gva_q_on_q".
+        aggregation_region (str): Top level geography. Defaults to "uk".
+        region_measure (str): Growth measure regional. Defaults to "gva_q_on_4q".
+        step_size (int): Quarters to advance per OOS step. Defaults to 1.
+        init_chunk_size (int): Initial learning window size. Defaults to 20.
+        lag_qtrs (int): How many quarters before regional data are published. Defaults to 6.
+        n_its (int): Iterations of ADVI for Bayesian inference. Defaults to 100000.
+        n_posterior_samples (int): Samples of the posterior. Defaults to 3000.
 
     Returns:
-        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: Out-of-sample summary statistics, Annual-regional predictions and outturns, national quarterly predictions and outturns
+        pd.DataFrame: Combined out-of-sample nowcasts and outturns across
+            all rolling steps.
     """
     df = df.sort_values("datetime")
     stop: int = df.loc[df["measure"] == aggregate_measure, "datetime"].nunique()

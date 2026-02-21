@@ -16,9 +16,32 @@ OMEGA = np.array([1 / 4, 1 / 2, 3 / 4, 1, 3 / 4, 1 / 2, 1 / 4])
 # Functions
 # =============================================================================
 def generate_realistic_simulated_data(
-    T=130, R=12, J=4, n_factors=2, n_macro=2, lag_qtrs=6
+    T: int = 130,
+    R: int = 12,
+    J: int = 4,
+    n_factors: int = 2,
+    n_macro: int = 2,
+    lag_qtrs: int = 6,
 ) -> pd.DataFrame:
-    """Generate simulated data and run the Ambric model on it."""
+    """Generate simulated mixed-frequency regional data in long format.
+
+    Produces a ``pd.DataFrame`` resembling real-world data suitable for
+    initialising an :class:`~ambric.Ambric` model, including UK quarterly
+    growth, macro series, regional covariates, and lagged annual regional
+    growth.
+
+    Args:
+        T (int): Number of quarterly time periods.
+        R (int): Number of regions.
+        J (int): Number of regional covariate panels.
+        n_factors (int): Number of latent factors in the DGP.
+        n_macro (int): Number of macro indicator series.
+        lag_qtrs (int): Publication lag in quarters for annual regional data.
+
+    Returns:
+        pd.DataFrame: Long-format frame with columns
+            ``datetime``, ``measure``, ``region``, ``value``.
+    """
     # Simulate data
 
     logger.info(
@@ -208,8 +231,36 @@ def prep_data_for_model_run(
     )
 
 
-def simulate_data(T=80, R=6, J=3, n_factors=2, n_macro=2, seed=42):
-    """Simulate mixed-frequency data with regional panels and macro indicators."""
+def simulate_data(
+    T: int = 80,
+    R: int = 6,
+    J: int = 3,
+    n_factors: int = 2,
+    n_macro: int = 2,
+    seed: int = 42,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    list[npt.NDArray[np.float64]],
+    npt.NDArray[np.float64],
+]:
+    """Simulate mixed-frequency data with regional panels and macro indicators.
+
+    Args:
+        T (int): Number of quarterly time periods.
+        R (int): Number of regions.
+        J (int): Number of regional covariate panels.
+        n_factors (int): Number of latent factors.
+        n_macro (int): Number of macro indicator series.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        tuple: ``(y_uk, y_annual, y_reg_true, Z_panel, macro)`` — national
+            quarterly growth (T,), annual regional growth (T, R) with NaNs,
+            true quarterly regional growth (T, R), regional covariate
+            panels (list of J arrays each (T, R)), and macro series (T, M).
+    """
     np.random.seed(seed)
 
     # True factors (AR(1) processes)
@@ -257,8 +308,41 @@ def simulate_data(T=80, R=6, J=3, n_factors=2, n_macro=2, seed=42):
 
 
 def simulate_real_time_data(
-    T=80, R=6, J=3, n_factors=2, n_macro=2, annnual_regional_lag_qrtrs=6, seed=42
-):
+    T: int = 80,
+    R: int = 6,
+    J: int = 3,
+    n_factors: int = 2,
+    n_macro: int = 2,
+    annnual_regional_lag_qrtrs: int = 6,
+    seed: int = 42,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    list[npt.NDArray[np.float64]],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Simulate mixed-frequency data with a realistic publication lag.
+
+    Wraps :func:`simulate_data` and removes the most recent
+    ``annnual_regional_lag_qrtrs`` quarters of annual regional data to
+    mimic real-time data availability.
+
+    Args:
+        T (int): Number of quarterly time periods.
+        R (int): Number of regions.
+        J (int): Number of regional covariate panels.
+        n_factors (int): Number of latent factors.
+        n_macro (int): Number of macro indicator series.
+        annnual_regional_lag_qrtrs (int): Quarters of annual data to mask.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        tuple: ``(y_uk, y_annual, y_reg_true, Z_panel, macro, y_annual_no_lags)``
+            — same as :func:`simulate_data` with an additional copy of the
+            annual data before the lag was applied.
+    """
     y_uk, y_annual, y_reg_true, Z_panel, macro = simulate_data(
         T=T, R=R, J=J, n_factors=n_factors, n_macro=n_macro, seed=seed
     )
