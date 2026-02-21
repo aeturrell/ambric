@@ -128,13 +128,13 @@ def trace_to_series(
     Returns:
         tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]: Estimated UK quarterly, regional quarterly, and annual growth rates
     """
+    posterior = trace.posterior  # ty: ignore[unresolved-attribute]
+
     # Quarterly regional estimates
-    y_q_r_est_point = trace.posterior["y_reg"].mean(dim=("chain", "draw")).values
+    y_q_r_est_point = posterior["y_reg"].mean(dim=("chain", "draw")).values
 
     # UK quarterly estimates
-    y_q_uk_dist_est = (trace.posterior["y_reg"] * trace.posterior["w"]).sum(
-        dim="w_dim_0"
-    )
+    y_q_uk_dist_est = (posterior["y_reg"] * posterior["w"]).sum(dim="w_dim_0")
     y_q_uk_est_point = y_q_uk_dist_est.mean(dim=("chain", "draw")).values
 
     # Now take the mean over the regional axis to get the national growth rates
@@ -143,7 +143,7 @@ def trace_to_series(
     # Annual regional estimates
 
     # 2. Extract latent quarterly growth: (chain, draw, quarter, region)
-    y_q_dist_posterior = trace.posterior["y_reg"]  # ty: ignore
+    y_q_dist_posterior = posterior["y_reg"]
 
     # 3. Compute the weighted sum across lags
     # We shift the time dimension (y_reg_dim_0) for each weight
@@ -171,7 +171,7 @@ def plot_national_quarterly_vs_implied(
     y_uk: npt.NDArray[np.float64],
     y_uk_implied: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
-    path: Path | None = None,
+    path: str | Path | None = None,
 ):
     """Plot national quarterly growth rates: observed vs implied.
 
@@ -244,7 +244,7 @@ def plot_national_quarterly_vs_implied(
     )
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / "AMBRIC_quarterly_national.svg"))
+        plt.savefig(Path(path) / "AMBRIC_quarterly_national.svg")
     else:
         plt.show()
     plt.close()
@@ -255,7 +255,7 @@ def plot_regional_annual_estimate(
     y_annual_est: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    path: Path | None = None,
+    path: str | Path | None = None,
 ):
     rmse_regional_a = rmse_regions_annual(y_annual_true, y_annual_est)
 
@@ -336,7 +336,7 @@ def plot_regional_annual_estimate(
     fig.autofmt_xdate()
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / "AMBRIC_annual_regional.svg"))
+        plt.savefig(Path(path) / "AMBRIC_annual_regional.svg")
     else:
         plt.show()
     plt.close()
@@ -349,7 +349,7 @@ def plot_single_region_annual_estimate(
     region_idx: int,
     region_names: list[str],
     lag_qtrs: int,
-    path: Path | None = None,
+    path: str | Path | None = None,
 ):
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     fig, ax = plt.subplots(
@@ -368,7 +368,7 @@ def plot_single_region_annual_estimate(
     ax.set_ylabel(region_names[region_idx])
     ax.set_ylim(-y_lim, y_lim)
     ax.axvline(
-        nowcast_period_start,  # ty: ignore
+        nowcast_period_start,
         color="red",
         linestyle="--",
         lw=0.5,
@@ -425,7 +425,7 @@ def plot_single_region_annual_estimate(
     plt.suptitle("Annual q-on-4q Regional Growth: True vs Estimated")
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / f"AMBRIC_annual_{region_names[region_idx]}.svg"))
+        plt.savefig(Path(path) / f"AMBRIC_annual_{region_names[region_idx]}.svg")
     else:
         plt.show()
     plt.close()
@@ -436,7 +436,7 @@ def plot_estimated_regional_quarterly(
     datetime_ts: pd.Series,
     region_names: list[str],
     lag_qtrs: int,
-    path: Path | None = None,
+    path: str | Path | None = None,
 ):
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     R: int = np.shape(y_reg_est)[1]
@@ -456,7 +456,7 @@ def plot_estimated_regional_quarterly(
         axes[i].set_ylim(-ylim, ylim)
         axes[i].xaxis.set_major_locator(mdates.YearLocator(20))
         axes[i].axvline(
-            nowcast_period_start,  # ty: ignore
+            nowcast_period_start,
             color="red",
             linestyle="--",
             lw=0.5,
@@ -469,7 +469,7 @@ def plot_estimated_regional_quarterly(
     fig.autofmt_xdate()
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path / "AMBRIC_quarterly_regional.svg"))
+        plt.savefig(Path(path) / "AMBRIC_quarterly_regional.svg")
     else:
         plt.show()
 
