@@ -43,7 +43,6 @@ import numpy.typing as npt
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
-import xgboost as xgb
 from great_tables import GT
 from loguru import logger
 from scipy.optimize import minimize
@@ -53,6 +52,7 @@ from sklearn.impute import IterativeImputer
 from sklearn.linear_model import BayesianRidge, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
+from xgboost import XGBRegressor
 
 from ambric.diagnostics import (
     live_recession_indicator,
@@ -213,7 +213,7 @@ def train_xgboost_annual(
     macro: npt.NDArray[np.float64],
     y_annual: npt.NDArray[np.float64],
     xgb_params: dict | None = None,
-) -> tuple[xgb.XGBRegressor, npt.NDArray[np.float64]]:
+) -> tuple[XGBRegressor, npt.NDArray[np.float64]]:
     """Train XGBoost to predict annual regional growth from annually-aggregated features.
 
     The model is trained on a pooled panel: all region-year pairs where
@@ -274,7 +274,7 @@ def train_xgboost_annual(
     if xgb_params is not None:
         default_params.update(xgb_params)
 
-    model = xgb.XGBRegressor(**default_params)
+    model = XGBRegressor(**default_params)
     model.fit(X_train, y_train)
 
     # Predict for all region-years
@@ -735,7 +735,7 @@ class Ambric:
         self.factors: npt.NDArray[np.float64] | None = None
         self.bridge_signal: npt.NDArray[np.float64] | None = None
         self.bridge_info: dict | None = None
-        self.xgb_model: xgb.XGBRegressor | None = None
+        self.xgb_model: XGBRegressor | None = None
         self.n_model_fit_iterations: int | None = None
         self.model_id: str = gen_unique_id()
         self.datetime_ts: pd.Series = df.loc[
@@ -762,7 +762,7 @@ class Ambric:
         if self.trace:
             out_string += (
                 f"Model fitted: Yes\n"
-                f"   Posterior samples: {self.trace.posterior.draw.shape[0]}\n"
+                f"   Posterior samples: {self.trace.posterior.draw.shape[0]}\n"  # ty: ignore[unresolved-attribute]
                 f"   ADVI iterations: {self.n_model_fit_iterations}\n"
             )
         else:
@@ -1048,7 +1048,14 @@ class Ambric:
 
         Args:
             path (Path | None, optional): Dir to save figure to. Defaults to None.
+
+        Raises:
+            ValueError: If model not fitted.
         """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before plotting."
+            )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
         # Look back 4 units more than the nowcast is for:
         backlook = self.lag_qtrs + 6
@@ -1062,12 +1069,19 @@ class Ambric:
             path=path,
         )
 
-    def live_recession_indicator(self) -> GT:
+    def live_recession_indicator(self) -> pd.DataFrame:
         """Produces a table giving nowcast indicating growth vs recession by region. Quarterly frequency but q on 4q estimates
 
         Returns:
-            GT: great_table of recession nowcasts.
+            pd.DataFrame: DataFrame of recession nowcasts.
+
+        Raises:
+            ValueError: If model not fitted.
         """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
         # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
         gt_table = live_recession_indicator(
@@ -1083,7 +1097,14 @@ class Ambric:
 
         Returns:
             GT: great_table of recession nowcasts.
+
+        Raises:
+            ValueError: If model not fitted.
         """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
         # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
         df = (
