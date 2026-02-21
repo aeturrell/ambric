@@ -1137,8 +1137,8 @@ def live_recession_indicator(
     """Return recession indicator for nowcast growth q on 4q."""
 
     df = recession_indicator(
-        y_nowcast[-2:, :],
-        datetime_ts.iloc[-2:],
+        y_nowcast,
+        datetime_ts,
         region_names,
     )
     df = df.pivot(
