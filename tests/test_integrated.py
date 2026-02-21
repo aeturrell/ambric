@@ -62,6 +62,25 @@ def test_vanilla_run(mock_show) -> None:
     amb.plot_current_nowcast()
     amb.live_recession_indicator()
     amb.live_point_estimates()
+
+    # Loadings diagnostics: verify data assembly and both plot variants.
+    loadings_df = amb.assemble_loadings_data()
+    assert not loadings_df.empty
+    expected_cols = {
+        "region",
+        "loading_name",
+        "broad_type",
+        "mean",
+        "hdi_low",
+        "hdi_high",
+    }
+    assert expected_cols.issubset(loadings_df.columns)
+    expected_broad_types = {"factors", "macro", "boost_signal"}
+    assert expected_broad_types == set(loadings_df["broad_type"].unique())
+    assert set(loadings_df["region"].unique()) == set(region_names)
+    amb.plot_loadings_by_region()
+    amb.plot_loadings_aggregate()
+
     mock_show.assert_called()
 
 

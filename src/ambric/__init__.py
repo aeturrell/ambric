@@ -55,9 +55,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from ambric.diagnostics import (
+    assemble_loadings_data,
     live_recession_indicator,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
+    plot_loadings_aggregate,
+    plot_loadings_by_region,
     plot_national_quarterly_vs_implied,
     plot_regional_annual_estimate,
     plot_single_region_annual_estimate,
@@ -723,6 +726,7 @@ class Ambric:
         self.aggregate_measure = aggregate_measure
         self.aggregation_region = aggregation_region
         self.region_measure = region_measure
+        self.macro_names: list[str] = macro_names
         self.df = df.copy()
         self.y_uk: npt.NDArray[np.float64] = y_uk
         self.y_annual: npt.NDArray[np.float64] = y_annual
@@ -1061,6 +1065,81 @@ class Ambric:
             backlook_qtrs=backlook,
             path=path,
         )
+
+    def assemble_loadings_data(self) -> pd.DataFrame:
+        """Assemble estimated loadings from the model posterior.
+
+        Separates data assembly from plotting so the returned frame can be
+        inspected, exported, or passed to the companion plot methods.  The
+        frame contains one row per (region, loading) combination with the
+        posterior mean and 94 % HDI bounds.
+
+        Raises:
+            ValueError: If the model has not been fitted yet.
+
+        Returns:
+            pd.DataFrame: Long-format loadings frame; see
+                :func:`~ambric.diagnostics.assemble_loadings_data` for
+                column details.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before assembling loadings."
+            )
+        return assemble_loadings_data(
+            self.trace,
+            region_names=self.region_names,
+            macro_names=self.macro_names,
+        )
+
+    def plot_loadings_by_region(self, path: Path | None = None) -> None:
+        """Plot estimated loadings for each region, coloured by broad type.
+
+        Assembles loadings from the posterior and passes them to
+        :func:`~ambric.diagnostics.plot_loadings_by_region`.  One panel per
+        region shows all factor, macro, and bridge-signal loadings as a
+        horizontal dot chart with 94 % HDI bars, enabling within-region
+        comparison of the three signal categories.
+
+        Args:
+            path (Path | None): Directory in which to save the figure as
+                SVG.  When ``None`` the figure is displayed interactively.
+
+        Raises:
+            ValueError: If the model has not been fitted yet.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before plotting."
+            )
+        loadings_df = self.assemble_loadings_data()
+        plot_loadings_by_region(loadings_df, self.region_names, path=path)
+        logger.info("Plotted loadings by region.")
+
+    def plot_loadings_aggregate(self, path: Path | None = None) -> None:
+        """Plot loading distributions across regions, grouped by broad type.
+
+        Assembles loadings from the posterior and passes them to
+        :func:`~ambric.diagnostics.plot_loadings_aggregate`.  One panel per
+        broad loading type (factors, macro, boost_signal) compares individual
+        region estimates against the cross-region mean, enabling assessment
+        of which signal category dominates model dynamics and how consistently
+        loadings behave across regions.
+
+        Args:
+            path (Path | None): Directory in which to save the figure as
+                SVG.  When ``None`` the figure is displayed interactively.
+
+        Raises:
+            ValueError: If the model has not been fitted yet.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before plotting."
+            )
+        loadings_df = self.assemble_loadings_data()
+        plot_loadings_aggregate(loadings_df, path=path)
+        logger.info("Plotted loadings in aggregate by broad type.")
 
     def live_recession_indicator(self) -> GT:
         """Produces a table giving nowcast indicating growth vs recession by region. Quarterly frequency but q on 4q estimates
