@@ -111,6 +111,7 @@ def prep_data_for_model_run(
     npt.NDArray[np.float64],
     list[npt.NDArray[np.float64]],
     npt.NDArray[np.float64],
+    int,
 ]:
     """Expects a data frame in following format:
     datetime | measure | region | value
@@ -203,7 +204,7 @@ def prep_data_for_model_run(
         Z_panel_extract,
         macro_extracted,
         missing_annual,
-    )  # ty: ignore
+    )
 
 
 def simulate_data(T=80, R=6, J=3, n_factors=2, n_macro=2, seed=42):
