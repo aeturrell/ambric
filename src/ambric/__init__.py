@@ -43,7 +43,6 @@ import numpy.typing as npt
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
-from great_tables import GT
 from loguru import logger
 from scipy.optimize import minimize
 from sklearn.decomposition import FactorAnalysis
@@ -1069,11 +1068,8 @@ class Ambric:
             path=path,
         )
 
-    def live_recession_indicator(self) -> pd.DataFrame:
+    def live_recession_indicator(self, path: Path | None = None) -> pd.DataFrame:
         """Produces a table giving nowcast indicating growth vs recession by region. Quarterly frequency but q on 4q estimates
-
-        Returns:
-            pd.DataFrame: DataFrame of recession nowcasts.
 
         Raises:
             ValueError: If model not fitted.
@@ -1084,19 +1080,18 @@ class Ambric:
             )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
         # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
-        gt_table = live_recession_indicator(
+        out_table = live_recession_indicator(
             y_a_r_est_point,
             region_names=self.region_names,
             datetime_ts=self.datetime_ts,
             lag_qtrs=self.lag_qtrs,
         )
-        return gt_table
+        if path:
+            out_table.to_parquet(path / "recession_indicator.parquet")
+        return out_table
 
-    def live_point_estimates(self) -> GT:
+    def live_point_estimates(self, path: Path | None = None) -> pd.DataFrame:
         """Produces a table giving nowcast point estimates by region. Quarterly frequency but q_on_4q estimates.
-
-        Returns:
-            GT: great_table of recession nowcasts.
 
         Raises:
             ValueError: If model not fitted.
@@ -1109,18 +1104,16 @@ class Ambric:
         # Simple recession indicator based on sign of quarterly growth in the most recent quarter for each region
         df = (
             pd.DataFrame(
-                y_a_r_est_point[-2:, :],
-                index=self.datetime_ts.iloc[-2:],
+                y_a_r_est_point,
+                index=self.datetime_ts,
                 columns=self.region_names,
             )
             * 100
         ).round(2)
-        df.index.name = "Date"
-        df = df.reset_index()
-        gt_table = GT(df).tab_header(
-            title=f"Nowcast for {self.datetime_ts.iloc[-1].strftime('%Y-%m')} (% annual growth)",
-        )
-        return gt_table
+        df.index.name = "datetime"
+        if path:
+            df.to_parquet(path / "point_estimates.parquet")
+        return df
 
 
 def run_out_of_sample_exercise(
