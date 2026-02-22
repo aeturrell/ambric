@@ -27,7 +27,7 @@ metadata-files:
 
 quartodoc:
   # the name used to import the package you want to create reference docs for
-  package: AMBRIC
+  package: ambric
   parser: google
 
   # write sidebar data to this file
@@ -39,18 +39,6 @@ quartodoc:
       contents:
         - Ambric
         - run_out_of_sample_exercise
-    - title: "In-sample diagnostics"
-      desc: "Plotting and RMSE functions for fitted model results"
-      contents:
-        - diagnostics.plot_national_quarterly_vs_implied
-        - diagnostics.plot_regional_annual_estimate
-        - diagnostics.plot_single_region_annual_estimate
-        - diagnostics.plot_estimated_regional_quarterly
-        - diagnostics.plot_current_nowcast
-        - diagnostics.rmse_regions_quarterly
-        - diagnostics.rmse_regions_annual
-        - diagnostics.rmse_national_quarterly
-        - diagnostics.recession_indicator
     - title: "Loadings diagnostics"
       desc: "Functions for inspecting estimated model loadings"
       contents:
@@ -67,4 +55,4 @@ quartodoc:
       desc: "Data preparation and simulation"
       contents:
         - utilities.generate_realistic_simulated_data
-        - utilities.prep_data_for_model_run
+

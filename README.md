@@ -45,7 +45,7 @@ The core model features are:
 
 - Dimensional reduction: With a rich set of data on each region, it would be extremely difficult to solve the model due to the increasing number of parameters. Factor analysis is applied to the panel of regional indicators first to reduce the dimensionality to a manageable level.
 
-- XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. This allows the model to incorporate nonlinear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
+- XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. This allows the model to incorporate non-linear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
 
 ## Model Details
 
@@ -172,7 +172,7 @@ $$\delta_\sigma \sim \text{HalfNormal}(0.15)$$
 
 $$\delta_r \sim \mathcal{N}(\delta_\mu, \delta_\sigma) \quad [R]$$
 
-##### Growth
+##### Growth
 
 $$\sigma_\varepsilon \sim \text{HalfNormal}(0.03) \quad [R]$$
 

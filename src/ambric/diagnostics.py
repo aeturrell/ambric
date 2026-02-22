@@ -184,7 +184,7 @@ def plot_national_quarterly_vs_implied(
     """
     rmse_national_q = rmse_national_quarterly(y_uk, y_uk_implied)
     fig, ax = plt.subplots(figsize=(15, 6))
-    y_lim = np.max(y_uk) * 1.15
+    y_lim = np.max(y_uk) * 1.30
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
     ax.plot(
         datetime_ts,
