@@ -27,20 +27,32 @@ metadata-files:
 
 quartodoc:
   # the name used to import the package you want to create reference docs for
-  package: AMBRIC
+  package: ambric
   parser: google
 
   # write sidebar data to this file
   sidebar: _sidebar.yml
 
   sections:
-    - title: "Reference"
-      desc: "What AMBRIC's functions do"
+    - title: "Core"
+      desc: "Main model class and out-of-sample evaluation"
       contents:
-        # the functions being documented in the package.
-        # you can refer to anything: class methods, modules, etc..
         - Ambric
         - run_out_of_sample_exercise
+    - title: "Loadings diagnostics"
+      desc: "Functions for inspecting estimated model loadings"
+      contents:
+        - diagnostics.assemble_loadings_data
+        - diagnostics.plot_loadings_by_region
+        - diagnostics.plot_loadings_aggregate
+    - title: "Out-of-sample diagnostics"
+      desc: "Plotting and evaluation for out-of-sample exercises"
+      contents:
         - diagnostics.plot_out_of_sample_nowcasts
-        - diagnostics.plot_current_nowcast
+        - diagnostics.plot_out_of_sample_rmse
         - diagnostics.out_of_sample_classification_performance_table
+    - title: "Utilities"
+      desc: "Data preparation and simulation"
+      contents:
+        - utilities.generate_realistic_simulated_data
+

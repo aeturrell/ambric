@@ -172,18 +172,19 @@ def plot_national_quarterly_vs_implied(
     y_uk_implied: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     path: str | Path | None = None,
-):
+) -> None:
     """Plot national quarterly growth rates: observed vs implied.
 
     Args:
-        y_uk (npt.NDArray[np.float64]): True UK quarterly growth rates
-        y_uk_implied (npt.NDArray[np.float64]): Implied UK quarterly growth rates
-        datetime_ts (pd.Series): Time series of quarterly dates
-        path (Path | str): Path to save the plot
+        y_uk (npt.NDArray[np.float64]): True UK quarterly growth rates.
+        y_uk_implied (npt.NDArray[np.float64]): Implied UK quarterly growth rates.
+        datetime_ts (pd.Series): Time series of quarterly dates.
+        path (str | Path | None): Directory to save the plot. When ``None``
+            the figure is displayed interactively.
     """
     rmse_national_q = rmse_national_quarterly(y_uk, y_uk_implied)
     fig, ax = plt.subplots(figsize=(15, 6))
-    y_lim = np.max(y_uk) * 1.15
+    y_lim = np.max(y_uk) * 1.30
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
     ax.plot(
         datetime_ts,
@@ -256,7 +257,20 @@ def plot_regional_annual_estimate(
     datetime_ts: pd.Series,
     region_names: list[str],
     path: str | Path | None = None,
-):
+) -> None:
+    """Plot annual regional growth rates: observed vs estimated with recession bands.
+
+    One subplot per region in a grid layout.  Background bands are coloured
+    by the recession indicator (growth / recession / undetermined).
+
+    Args:
+        y_annual_true (npt.NDArray[np.float64]): True annual growth, shape (T, R).
+        y_annual_est (npt.NDArray[np.float64]): Estimated annual growth, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names for subplot labels.
+        path (str | Path | None): Directory to save the figure. When ``None``
+            the figure is displayed interactively.
+    """
     rmse_regional_a = rmse_regions_annual(y_annual_true, y_annual_est)
 
     # Get recession indicator
@@ -299,9 +313,11 @@ def plot_regional_annual_estimate(
     )
 
     R: int = np.shape(y_annual_est)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(20, 10),
         sharex=True,
         sharey=True,
@@ -326,12 +342,14 @@ def plot_regional_annual_estimate(
         axes[i].scatter(datetime_ts, y_annual_true[:, r], **true_settings)
         axes[i].plot(datetime_ts, y_annual_est[:, r], **estimate_settings)
         axes[i].set_ylabel(f"{region_names[i]}")
-        if r == 4:
+        if i == 0:
             axes[i].legend(loc="best")
         axes[i].set_ylim(-y_lim, y_lim)
         axes[i].xaxis.set_minor_locator(mdates.YearLocator())
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
-        f"Annual q-on-4q Regional Growth: True vs Estimated (mean RMSE: {rmse_regional_a[i]:.3f})"
+        f"Annual q-on-4q Regional Growth: True vs Estimated (mean RMSE: {np.mean(rmse_regional_a):.3f})"
     )
     fig.autofmt_xdate()
     plt.tight_layout()
@@ -350,7 +368,22 @@ def plot_single_region_annual_estimate(
     region_names: list[str],
     lag_qtrs: int,
     path: str | Path | None = None,
-):
+) -> None:
+    """Plot a single region's annual growth: observed vs estimated.
+
+    Draws the observed annual growth as scatter points and the estimated
+    series as a line, with a vertical marker indicating the nowcast period.
+
+    Args:
+        y_annual_true (npt.NDArray[np.float64]): True annual growth, shape (T, R).
+        y_annual_est (npt.NDArray[np.float64]): Estimated annual growth, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_idx (int): Column index of the region to plot.
+        region_names (list[str]): Region names (used for labels and filename).
+        lag_qtrs (int): Number of quarters of publication lag.
+        path (str | Path | None): Directory to save the figure. When ``None``
+            the figure is displayed interactively.
+    """
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     fig, ax = plt.subplots(
         figsize=(14, 6),
@@ -437,12 +470,27 @@ def plot_estimated_regional_quarterly(
     region_names: list[str],
     lag_qtrs: int,
     path: str | Path | None = None,
-):
+) -> None:
+    """Plot estimated regional quarterly growth rates in a grid layout.
+
+    One subplot per region showing the q-on-q growth estimate with a
+    vertical line marking the start of the nowcast period.
+
+    Args:
+        y_reg_est (npt.NDArray[np.float64]): Estimated quarterly growth, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names for subplot labels.
+        lag_qtrs (int): Number of quarters of publication lag.
+        path (str | Path | None): Directory to save the figure. When ``None``
+            the figure is displayed interactively.
+    """
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     R: int = np.shape(y_reg_est)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -462,6 +510,8 @@ def plot_estimated_regional_quarterly(
             lw=0.5,
             zorder=0,
         )
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
         "Regional Q-on-Q Growth Estimates",
         fontsize=14,
@@ -472,6 +522,7 @@ def plot_estimated_regional_quarterly(
         plt.savefig(Path(path) / "AMBRIC_quarterly_regional.svg")
     else:
         plt.show()
+    plt.close()
 
 
 # -----------------------------------------------------------------------------
@@ -638,8 +689,8 @@ def plot_loadings_by_region(
         loading_order.extend(names)
 
     n_loadings = len(loading_order)
-    n_rows = int(np.floor(np.sqrt(R)))
     n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     panel_height = max(3.5, n_loadings * 0.55 + 1.0)
 
     fig, axes = plt.subplots(
@@ -825,11 +876,28 @@ def plot_loadings_aggregate(
 # Out of sample results diagnostics from here
 
 
-def rmse(series_in: pd.Series):
-    return np.sqrt(np.mean(np.power(series_in, 2)))
+def rmse(series_in: pd.Series) -> float:
+    """Compute root-mean-square error of a Series.
+
+    Args:
+        series_in (pd.Series): Error values.
+
+    Returns:
+        float: RMSE value.
+    """
+    return float(np.sqrt(np.mean(np.power(series_in, 2))))
 
 
 def out_of_sample_rmse(df_oos_reg_a: pd.DataFrame) -> pd.DataFrame:
+    """Compute out-of-sample RMSE by region and quarters-to-publication.
+
+    Args:
+        df_oos_reg_a (pd.DataFrame): Out-of-sample results with ``error``,
+            ``quarters_to_publication``, and ``region`` columns.
+
+    Returns:
+        pd.DataFrame: RMSE grouped by quarters-to-publication and region.
+    """
     rmse_region_quarters = (
         df_oos_reg_a.dropna(subset="error")
         .groupby(["quarters_to_publication", "region"])["error"]
@@ -841,7 +909,19 @@ def out_of_sample_rmse(df_oos_reg_a: pd.DataFrame) -> pd.DataFrame:
 
 def plot_out_of_sample_rmse(
     df_results: pd.DataFrame, region_measure: str, path: Path | None = None
-):
+) -> None:
+    """Plot out-of-sample RMSEs by quarters-to-publication for each region.
+
+    One subplot per region in a grid layout showing how forecast accuracy
+    improves as publication approaches.
+
+    Args:
+        df_results (pd.DataFrame): Out-of-sample results from
+            :func:`~ambric.run_out_of_sample_exercise`.
+        region_measure (str): Regional measure name to filter on.
+        path (Path | None): Directory to save the figure. When ``None``
+            the figure is displayed interactively.
+    """
     df_regions = df_results.loc[(df_results["measure"] == region_measure), :].copy()
     df_regions["error"] = df_regions.groupby(["datetime", "region", "measure"])[
         "value"
@@ -859,9 +939,11 @@ def plot_out_of_sample_rmse(
     )
 
     R: int = len(rmses_by_pub_gap["region"].unique())
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -876,6 +958,8 @@ def plot_out_of_sample_rmse(
         axes[i].xaxis.set_minor_locator(AutoMinorLocator(2))
         axes[i].yaxis.set_major_locator(AutoLocator())
         axes[i].yaxis.set_minor_locator(AutoMinorLocator(2))
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle(
         "Out-of-sample regional growth RMSEs: lower is better but we care most about the first estimate",
     )
@@ -893,7 +977,20 @@ def plot_out_of_sample_nowcasts(
     df_results: pd.DataFrame,
     region_measure: str,
     path: Path | None = None,
-):
+) -> None:
+    """Plot out-of-sample nowcasts vs outturns for each region.
+
+    Produces one figure per region showing observed outturns as dots and
+    nowcasts at varying horizons with transparency indicating proximity to
+    publication.
+
+    Args:
+        df_results (pd.DataFrame): Out-of-sample results from
+            :func:`~ambric.run_out_of_sample_exercise`.
+        region_measure (str): Regional measure name to filter on.
+        path (Path | None): Directory to save the figures. When ``None``
+            the figures are displayed interactively.
+    """
     df_regions = df_results.loc[(df_results["measure"] == region_measure), :].copy()
     df_regions["error"] = df_regions.groupby(["datetime", "region", "measure"])[
         "value"
@@ -1008,23 +1105,40 @@ def plot_out_of_sample_nowcasts(
 
 
 def plot_current_nowcast(
-    y_nowcast,
-    y_annual,
-    datetime_ts,
-    region_names,
-    lag_qtrs,
+    y_nowcast: npt.NDArray[np.float64],
+    y_annual: npt.NDArray[np.float64],
+    datetime_ts: pd.Series,
+    region_names: list[str],
+    lag_qtrs: int,
     backlook_qtrs: int = 6,
     path: Path | None = None,
-):
+) -> None:
+    """Plot the latest nowcast vs observed annual growth for each region.
+
+    Shows a truncated window of the most recent quarters with nowcast
+    estimates (scatter) overlaid on observed annual data.
+
+    Args:
+        y_nowcast (npt.NDArray[np.float64]): Nowcast annual estimates, shape (T, R).
+        y_annual (npt.NDArray[np.float64]): Observed annual growth, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names for subplot labels.
+        lag_qtrs (int): Number of quarters of publication lag.
+        backlook_qtrs (int): Number of recent quarters to display.
+        path (Path | None): Directory to save the figure. When ``None``
+            the figure is displayed interactively.
+    """
     nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
     # truncate all the arrays:
     t_y_nowcast = y_nowcast[-backlook_qtrs:, :].copy()
     t_y_annual = y_annual[-backlook_qtrs:, :].copy()
     t_datetime_ts = datetime_ts.iloc[-backlook_qtrs:].copy()
     R: int = np.shape(y_nowcast)[1]
+    n_cols = int(np.ceil(np.sqrt(R)))
+    n_rows = int(np.ceil(R / n_cols))
     fig, axes = plt.subplots(
-        int(np.floor(np.sqrt(R))),
-        ncols=int(np.ceil(np.sqrt(R))),
+        n_rows,
+        ncols=n_cols,
         figsize=(18, 10),
         sharex=True,
         sharey=True,
@@ -1053,6 +1167,8 @@ def plot_current_nowcast(
         axes[i].set_ylabel(f"{region_names[i]}")
         axes[i].set_ylim(-y_lim, y_lim)
         axes[i].xaxis.set_minor_locator(mdates.YearLocator())
+    for j in range(R, len(axes)):
+        axes[j].set_visible(False)
     plt.suptitle("Nowcast: Regional Annual Growth")
     fig.autofmt_xdate()
     plt.tight_layout()
@@ -1066,10 +1182,10 @@ def plot_current_nowcast(
 
 
 def recession_indicator(
-    y_nowcast,
-    datetime_ts,
-    region_names,
-):
+    y_nowcast: npt.NDArray[np.float64],
+    datetime_ts: pd.Series,
+    region_names: list[str],
+) -> pd.DataFrame:
     """Classify each time period as growth, recession, or undetermined.
 
     Growth: part of two or more successive time periods of positive growth.
@@ -1077,10 +1193,13 @@ def recession_indicator(
     Undetermined: all other cases.
 
     Args:
-        df: DataFrame with datetime, region, and value columns.
+        y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names used as column headers.
 
     Returns:
-        DataFrame with region, datetime, and classification columns.
+        pd.DataFrame: Long-format frame with ``datetime``, ``region``, and
+            ``classification`` columns.
     """
     results = []
 
@@ -1129,12 +1248,23 @@ def recession_indicator(
 
 
 def live_recession_indicator(
-    y_nowcast,
-    datetime_ts,
-    region_names,
+    y_nowcast: npt.NDArray[np.float64],
+    datetime_ts: pd.Series,
+    region_names: list[str],
     lag_qtrs: int,
 ) -> pd.DataFrame:
-    """Return recession indicator for nowcast growth q on 4q."""
+    """Return recession indicator for nowcast growth q-on-4q, pivoted wide.
+
+    Args:
+        y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names.
+        lag_qtrs (int): Number of quarters of publication lag.
+
+    Returns:
+        pd.DataFrame: Wide-format frame with ``datetime`` as index and one
+            column per region containing the classification.
+    """
 
     df = recession_indicator(
         y_nowcast,
@@ -1150,17 +1280,29 @@ def live_recession_indicator(
 def out_of_sample_classification_performance_table(
     df_results: pd.DataFrame, region_measure: str, path: Path | None = None
 ) -> pd.DataFrame:
-    # Up or down classification performance
-    # Compare the signs
+    """Compute up/down classification accuracy by region and horizon.
+
+    Compares the sign of each nowcast to its corresponding outturn.
+    Returns a pivot table of percentage accuracy grouped by region and
+    quarters-to-publication.
+
+    Args:
+        df_results (pd.DataFrame): Out-of-sample results from
+            :func:`~ambric.run_out_of_sample_exercise`.
+        region_measure (str): Regional measure name to filter on.
+        path (Path | None): Directory to save a CSV of the table. When
+            ``None`` no file is written.
+
+    Returns:
+        pd.DataFrame: Pivot table of classification accuracy (%) with
+            regions as rows and quarters-to-publication as columns.
+    """
     df_region = df_results.loc[df_results["measure"] == region_measure, :].copy()
     # Want to compare every nowcast to its original outturn
     df_outturns_only = df_region.loc[df_region["type"] == "outturn"].drop(
         ["measure", "quarters_to_publication", "nowcast_index"], axis=1
     )
     df_outturns_only = df_outturns_only.loc[~df_outturns_only["value"].isna(), :]
-    df_region["sign"] = df_region.groupby(
-        ["datetime", "region", "type", "quarters_to_publication"]
-    )["value"].transform(np.sign)
 
     df_merge = pd.merge(
         df_region.loc[df_region["type"] != "outturn"],
