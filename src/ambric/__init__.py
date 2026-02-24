@@ -168,6 +168,14 @@ def extract_factors_from_panel(
     logger.info(f"   ...{n_factors} factors")
 
     Z_stacked = np.hstack(Z_panel) if isinstance(Z_panel, list) else Z_panel
+
+    n_features = Z_stacked.shape[1]
+    if n_factors > n_features:
+        raise ValueError(
+            f"n_factors ({n_factors}) exceeds the number of available features "
+            f"({n_features}). Reduce n_factors or add more regional indicators."
+        )
+
     if standardise:
         Z_stacked = StandardScaler().fit_transform(Z_stacked)
 
@@ -253,6 +261,12 @@ def train_xgboost_annual(
                 features = np.concatenate([Z_r_annual[a], macro_annual[a]])
                 X_rows.append(features)
                 y_rows.append(y_annual[q4_idx, r])
+
+    if not X_rows:
+        raise ValueError(
+            "No observed annual regional data available for XGBoost training. "
+            "Ensure y_annual contains at least one non-NaN value at a Q4 index."
+        )
 
     X_train = np.array(X_rows)
     y_train = np.array(y_rows)
@@ -453,6 +467,12 @@ def fit_bridge_equation(
                 row = np.concatenate([[xgb_annual_preds[a, r]], Q_r_annual[a]])
                 X_bridge_rows.append(row)
                 y_bridge_rows.append(y_annual[q4_idx, r])
+
+    if not X_bridge_rows:
+        raise ValueError(
+            "No observed annual regional data available for bridge equation. "
+            "Ensure y_annual contains at least one non-NaN value at a Q4 index."
+        )
 
     X_bridge = np.array(X_bridge_rows)
     y_bridge = np.array(y_bridge_rows)
