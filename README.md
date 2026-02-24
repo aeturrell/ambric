@@ -86,7 +86,7 @@ $$
 \end{equation}
 $$
 
-where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive terms in equation (1) are diagonal matrices; $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$, and $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$. $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication.
+where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive terms in equation (1) are diagonal matrices; $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$, and $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$. $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication (the Hadamard product.)
 
 #### Observed vs estimated data
 

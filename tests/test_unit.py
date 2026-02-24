@@ -5,12 +5,9 @@ No model fitting is performed — only the deterministic helpers and
 validation paths are exercised.
 """
 
-from unittest.mock import patch
-
 import numpy as np
 import pandas as pd
 import pytest
-
 from ambric import (
     Ambric,
     _aggregate_quarterly_to_annual,
@@ -28,7 +25,6 @@ from ambric.diagnostics import (
     rmse_regions_quarterly,
 )
 from ambric.utilities import generate_realistic_simulated_data, prep_data_for_model_run
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
