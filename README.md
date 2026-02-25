@@ -14,8 +14,6 @@
 ![macOS](https://img.shields.io/badge/mac%20os-000000?style=for-the-badge&logo=macos&logoColor=F0F0F0)
 
 
-https://academic.oup.com/jrsssc
-
 ## **Augmented Mixed-frequency Bayesian Regional Inference with Constraints**
 
 AMBRIC is a Bayesian state-space model for estimating latent regional growth in a given variable from sparse and temporally misaligned observations. It combines factor analysis, autoregressive dynamics at both the factor and regional level, and observation constraints from aggregate (UK-wide) and Annual regional data.

@@ -589,7 +589,7 @@ def build_ambric_model(
 
         # --- Noise parameters ---
         sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.03, shape=R)
-        sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.05)
+        sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.01)
         sigma_ann = pm.HalfNormal("sigma_ann", sigma=0.2, shape=R)
 
         # --- Factor AR(1) dynamics ---
