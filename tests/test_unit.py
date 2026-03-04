@@ -19,6 +19,7 @@ from ambric import (
     train_xgboost_annual,
 )
 from ambric.diagnostics import (
+    assemble_loadings_data,
     recession_indicator,
     rmse_national_quarterly,
     rmse_regions_annual,
@@ -486,3 +487,85 @@ class TestGenerateRealisticSimulatedData:
         assert "macro_1" in measures
         assert "regional_covar_00" in measures
         assert "regional_covar_01" in measures
+
+
+# ── assemble_loadings_data scaling ──────────────────────────────────────────
+
+
+class TestAssembleLoadingsDataScaling:
+    """Verify that stds scale loadings correctly in assemble_loadings_data."""
+
+    @pytest.fixture()
+    def mock_trace(self):
+        """Minimal ArviZ InferenceData with deterministic posterior values."""
+        import arviz as az
+        import xarray as xr
+
+        R, K, M = 2, 2, 1
+        # Use a single chain / single draw so mean == the value itself.
+        lambda_vals = np.array([[[0.5, -1.0], [2.0, 0.3]]])  # (1, R, K)
+        gamma_vals = np.array([[[0.4], [0.8]]])  # (1, R, M)
+        delta_vals = np.array([[1.5, -0.6]])  # (1, R)
+
+        posterior = xr.Dataset(
+            {
+                "Lambda": (["chain", "region", "factor"], lambda_vals),
+                "Gamma": (["chain", "region", "macro"], gamma_vals),
+                "delta_r": (["chain", "region"], delta_vals),
+            },
+            coords={
+                "chain": [0],
+                "region": list(range(R)),
+                "factor": list(range(K)),
+                "macro": list(range(M)),
+            },
+        )
+        # ArviZ expects a "draw" dimension; rename the single-element chain
+        # trick: expand with a draw dimension of length 1.
+        posterior = posterior.expand_dims("draw")
+
+        return az.InferenceData(posterior=posterior)
+
+    def test_unscaled_returns_raw_values(self, mock_trace):
+        df = assemble_loadings_data(
+            mock_trace,
+            region_names=["A", "B"],
+            macro_names=["gdp"],
+        )
+        # No scaling applied — factor_0 for region A should be raw 0.5
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_0")]
+        assert np.isclose(row["mean"].iloc[0], 0.5)
+        assert "scaled" in df.columns
+        assert not df["scaled"].any()
+
+    def test_scaled_multiplies_by_std(self, mock_trace):
+        factor_stds = np.array([2.0, 3.0])
+        macro_stds = np.array([0.5])
+        bridge_signal_stds = np.array([4.0, 5.0])
+
+        df = assemble_loadings_data(
+            mock_trace,
+            region_names=["A", "B"],
+            macro_names=["gdp"],
+            factor_stds=factor_stds,
+            macro_stds=macro_stds,
+            bridge_signal_stds=bridge_signal_stds,
+        )
+
+        # Factor 0 for region A: 0.5 * 2.0 = 1.0
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_0")]
+        assert np.isclose(row["mean"].iloc[0], 1.0)
+
+        # Factor 1 for region A: -1.0 * 3.0 = -3.0
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_1")]
+        assert np.isclose(row["mean"].iloc[0], -3.0)
+
+        # Macro "gdp" for region B: 0.8 * 0.5 = 0.4
+        row = df[(df["region"] == "B") & (df["loading_name"] == "gdp")]
+        assert np.isclose(row["mean"].iloc[0], 0.4)
+
+        # Bridge signal for region B: -0.6 * 5.0 = -3.0
+        row = df[(df["region"] == "B") & (df["loading_name"] == "boost_signal")]
+        assert np.isclose(row["mean"].iloc[0], -3.0)
+
+        assert df["scaled"].all()
