@@ -89,6 +89,90 @@ def test_vanilla_run(mock_show) -> None:
 # NB: doesn't test model prep
 # ----------------------------------------------
 @patch("matplotlib.pyplot.show")
+def test_vanilla_run_one_region_no_lag(mock_show) -> None:
+    """Like test_vanilla_run but one region has valid data up to the latest
+    quarterly period (i.e. no publication lag for that region).  The model
+    should still identify the modal lag across regions and work correctly."""
+    n_factors = 2
+    lag_qtrs = 6
+
+    df_as_if_real: pd.DataFrame = generate_realistic_simulated_data(
+        n_factors=n_factors, lag_qtrs=lag_qtrs
+    )
+
+    aggregation_region = "uk"
+    region_names = [
+        x for x in df_as_if_real["region"].unique() if x != aggregation_region
+    ]
+    macro_names = [x for x in df_as_if_real["measure"].unique() if "macro" in x]
+    region_covariate_names = [
+        x for x in df_as_if_real["measure"].unique() if "regional_covar" in x
+    ]
+
+    # Extend one region's gva_q_on_4q data to cover the lag period.
+    # The simulated data has all regional annual data ending `lag_qtrs`
+    # quarters before the UK quarterly data.  We fill in the missing
+    # quarters for region_00 with plausible values so it has no lag.
+    uk_dates = sorted(
+        df_as_if_real.loc[df_as_if_real["measure"] == "gva_q_on_q", "datetime"].unique()
+    )
+    existing_regional_dates = sorted(
+        df_as_if_real.loc[
+            df_as_if_real["measure"] == "gva_q_on_4q", "datetime"
+        ].unique()
+    )
+    extra_dates = [d for d in uk_dates if d not in existing_regional_dates]
+    target_region = region_names[0]
+
+    extra_rows = pd.DataFrame(
+        {
+            "datetime": extra_dates,
+            "measure": "gva_q_on_4q",
+            "region": target_region,
+            "value": np.random.default_rng(42).normal(
+                0.02, 0.01, size=len(extra_dates)
+            ),
+        }
+    )
+    df_as_if_real = pd.concat([df_as_if_real, extra_rows], ignore_index=True)
+
+    amb = Ambric(
+        df_as_if_real,
+        macro_names,
+        region_names,
+        region_covariate_names,
+        n_factors=n_factors,
+    )
+
+    # The modal lag should be the original lag_qtrs, not 0
+    assert (
+        amb.lag_qtrs == lag_qtrs
+    ), f"Expected modal lag_qtrs={lag_qtrs}, got {amb.lag_qtrs}"
+
+    logger.info("Ambric model created with ID: " + amb.model_id)
+
+    n_its = 1000
+    n_posterior_samples = 3000
+
+    amb.fit(
+        n_model_fit_iterations=n_its,
+        n_posterior_samples=n_posterior_samples,
+    )
+
+    logger.info("AMBRIC model fit complete")
+
+    amb.plot_national_quarterly_vs_implied()
+    amb.plot_regional_annual_estimate()
+    amb.plot_single_region_annual_estimate(region_name=target_region)
+    amb.plot_estimated_regional_quarterly()
+    amb.plot_current_nowcast()
+    amb.live_recession_indicator()
+    amb.live_point_estimates()
+
+    mock_show.assert_called()
+
+
+@patch("matplotlib.pyplot.show")
 def test_pseudo_realtime_directly(mock_show) -> None:
     """Direct function to run realtime simulation."""
 
