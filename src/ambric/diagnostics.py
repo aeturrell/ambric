@@ -384,7 +384,9 @@ def plot_single_region_annual_estimate(
         path (str | Path | None): Directory to save the figure. When ``None``
             the figure is displayed interactively.
     """
-    nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
+    nowcast_period_start = (
+        datetime_ts.iloc[-lag_qtrs] if lag_qtrs > 0 else datetime_ts.iloc[-1]
+    )
     fig, ax = plt.subplots(
         figsize=(14, 6),
     )
@@ -484,7 +486,9 @@ def plot_estimated_regional_quarterly(
         path (str | Path | None): Directory to save the figure. When ``None``
             the figure is displayed interactively.
     """
-    nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
+    nowcast_period_start = (
+        datetime_ts.iloc[-lag_qtrs] if lag_qtrs > 0 else datetime_ts.iloc[-1]
+    )
     R: int = np.shape(y_reg_est)[1]
     n_cols = int(np.ceil(np.sqrt(R)))
     n_rows = int(np.ceil(R / n_cols))
@@ -1128,7 +1132,9 @@ def plot_current_nowcast(
         path (Path | None): Directory to save the figure. When ``None``
             the figure is displayed interactively.
     """
-    nowcast_period_start = datetime_ts.iloc[-lag_qtrs]
+    nowcast_period_start = (
+        datetime_ts.iloc[-lag_qtrs] if lag_qtrs > 0 else datetime_ts.iloc[-1]
+    )
     # truncate all the arrays:
     t_y_nowcast = y_nowcast[-backlook_qtrs:, :].copy()
     t_y_annual = y_annual[-backlook_qtrs:, :].copy()

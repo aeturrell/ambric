@@ -194,8 +194,8 @@ def prep_data_for_model_run(
         .pivot(index="datetime", columns="region", values="value")
         .values
     )
-    # If len(y_a_r_extracted) < len(y_uk_extracted), extend the latter with nans
-    # this is to enable the model to fill in the (given) nan gaps
+    # If len(y_a_r_extracted) < len(y_uk_extracted), extend with nans
+    # so the model can fill in the (given) nan gaps
     missing_annual = len(y_uk_extracted) - len(y_a_r_extracted)
     if missing_annual > 0:
         nan_array_to_concat = np.full(
@@ -205,6 +205,26 @@ def prep_data_for_model_run(
         logger.info(
             f"Adding {str(missing_annual)} extra rows of nans to q-on-4q regional data to match number of rows in quarterly data; these extra rows will be estimated by the model."
         )
+
+    # Compute lag_qtrs from per-region trailing NaN counts.
+    # One region may have data up to the latest period while most have a
+    # publication lag — use the modal trailing-NaN count so lag_qtrs reflects
+    # the typical lag rather than being driven by a single outlier region.
+    n_rows = y_a_r_extracted.shape[0]
+    trailing_nans_per_region = np.array(
+        [
+            n_rows
+            if np.all(np.isnan(y_a_r_extracted[:, r]))
+            else int(np.argmax(~np.isnan(y_a_r_extracted[::-1, r])))
+            for r in range(y_a_r_extracted.shape[1])
+        ]
+    )
+    values, counts = np.unique(trailing_nans_per_region, return_counts=True)
+    lag_qtrs = int(values[np.argmax(counts)])
+    logger.info(
+        f"Per-region trailing NaN counts: {trailing_nans_per_region}; "
+        f"using modal lag_qtrs={lag_qtrs}"
+    )
 
     all_datetimes = sorted(df["datetime"].unique())
     Z_panel_extract: list[npt.NDArray[np.float64]] = [
@@ -227,7 +247,7 @@ def prep_data_for_model_run(
         y_a_r_extracted,
         Z_panel_extract,
         macro_extracted,
-        missing_annual,
+        lag_qtrs,
     )
 
 
