@@ -545,12 +545,20 @@ def assemble_loadings_data(
     trace: az.InferenceData,
     region_names: list[str],
     macro_names: list[str] | None = None,
+    factor_stds: npt.NDArray[np.float64] | None = None,
+    macro_stds: npt.NDArray[np.float64] | None = None,
+    bridge_signal_stds: npt.NDArray[np.float64] | None = None,
 ) -> pd.DataFrame:
     """Assemble estimated loadings from the posterior into a long-format DataFrame.
 
     Extracts factor loadings (Lambda), macro loadings (Gamma), and bridge
     signal loadings (delta_r) from the posterior, returning the posterior
     mean and 94 % HDI bounds for every loading-region combination.
+
+    When variable standard deviations are supplied the raw loadings are
+    scaled by ``loading × std(variable)`` so that all three signal types
+    are expressed on a comparable *contribution* scale (impact per typical
+    move in the input).
 
     Three broad loading types are distinguished:
 
@@ -567,6 +575,15 @@ def assemble_loadings_data(
         macro_names (list[str] | None): Names of the M macro series in model
             order.  When ``None``, generic labels ``"macro_0"``,
             ``"macro_1"``, … are used.
+        factor_stds (npt.NDArray | None): Standard deviations of the K
+            factor series, shape ``(K,)``.  When provided, factor loadings
+            are multiplied by the corresponding std.
+        macro_stds (npt.NDArray | None): Standard deviations of the M macro
+            series, shape ``(M,)``.  When provided, macro loadings are
+            multiplied by the corresponding std.
+        bridge_signal_stds (npt.NDArray | None): Standard deviations of the
+            R bridge signal series, shape ``(R,)``.  When provided, bridge
+            loadings are multiplied by the corresponding std.
 
     Returns:
         pd.DataFrame: Long-format frame with columns:
@@ -579,8 +596,15 @@ def assemble_loadings_data(
             - ``mean`` (float) – posterior mean of the loading.
             - ``hdi_low`` (float) – lower bound of the 94 % HDI.
             - ``hdi_high`` (float) – upper bound of the 94 % HDI.
+            - ``scaled`` (bool) – whether the values have been scaled by
+              the variable std.
     """
     rows: list[dict] = []
+    scaled = (
+        factor_stds is not None
+        or macro_stds is not None
+        or bridge_signal_stds is not None
+    )
 
     # --- Factor loadings: Lambda has shape (R, K) in the model ---
     lambda_mean: npt.NDArray[np.float64] = (
@@ -593,14 +617,16 @@ def assemble_loadings_data(
 
     for r, region in enumerate(region_names):
         for k in range(K):
+            s = float(factor_stds[k]) if factor_stds is not None else 1.0
             rows.append(
                 {
                     "region": region,
                     "loading_name": f"factor_{k}",
                     "broad_type": "factors",
-                    "mean": float(lambda_mean[r, k]),
-                    "hdi_low": float(lambda_hdi[r, k, 0]),
-                    "hdi_high": float(lambda_hdi[r, k, 1]),
+                    "mean": float(lambda_mean[r, k]) * s,
+                    "hdi_low": float(lambda_hdi[r, k, 0]) * s,
+                    "hdi_high": float(lambda_hdi[r, k, 1]) * s,
+                    "scaled": scaled,
                 }
             )
 
@@ -618,14 +644,16 @@ def assemble_loadings_data(
     )
     for r, region in enumerate(region_names):
         for m, name in enumerate(resolved_macro_names):
+            s = float(macro_stds[m]) if macro_stds is not None else 1.0
             rows.append(
                 {
                     "region": region,
                     "loading_name": name,
                     "broad_type": "macro",
-                    "mean": float(gamma_mean[r, m]),
-                    "hdi_low": float(gamma_hdi[r, m, 0]),
-                    "hdi_high": float(gamma_hdi[r, m, 1]),
+                    "mean": float(gamma_mean[r, m]) * s,
+                    "hdi_low": float(gamma_hdi[r, m, 0]) * s,
+                    "hdi_high": float(gamma_hdi[r, m, 1]) * s,
+                    "scaled": scaled,
                 }
             )
 
@@ -638,14 +666,16 @@ def assemble_loadings_data(
     )["delta_r"].values  # (R, 2)
 
     for r, region in enumerate(region_names):
+        s = float(bridge_signal_stds[r]) if bridge_signal_stds is not None else 1.0
         rows.append(
             {
                 "region": region,
                 "loading_name": "boost_signal",
                 "broad_type": "boost_signal",
-                "mean": float(delta_mean[r]),
-                "hdi_low": float(delta_hdi[r, 0]),
-                "hdi_high": float(delta_hdi[r, 1]),
+                "mean": float(delta_mean[r]) * s,
+                "hdi_low": float(delta_hdi[r, 0]) * s,
+                "hdi_high": float(delta_hdi[r, 1]) * s,
+                "scaled": scaled,
             }
         )
 
@@ -654,6 +684,7 @@ def assemble_loadings_data(
         f"Assembled loadings data: {len(df)} rows across "
         f"{len(region_names)} regions, "
         f"broad types: {df['broad_type'].unique().tolist()}"
+        f"{', scaled by variable stds' if scaled else ''}"
     )
     return df
 
@@ -763,7 +794,17 @@ def plot_loadings_by_region(
     for j in range(R, len(axes)):
         axes[j].set_visible(False)
 
-    plt.suptitle("Estimated Loadings by Region (94 % HDI)", fontsize=13)
+    is_scaled = "scaled" in loadings_df.columns and loadings_df["scaled"].any()
+    if is_scaled:
+        plt.suptitle(
+            "Scaled Contributions by Region (loading \u00d7 std, 94 % HDI)",
+            fontsize=13,
+        )
+        for ax in axes[:R]:
+            ax.set_xlabel("Contribution (loading \u00d7 std)", fontsize=8)
+    else:
+        plt.suptitle("Estimated Loadings by Region (94 % HDI)", fontsize=13)
+
     plt.tight_layout()
     if path is not None:
         plt.savefig(Path(path) / "AMBRIC_loadings_by_region.svg")
@@ -862,13 +903,23 @@ def plot_loadings_aggregate(
         ax.set_yticks(range(len(loading_names)))
         ax.set_yticklabels(loading_names, fontsize=9)
         ax.set_title(broad_type.replace("_", " ").title(), fontsize=11)
-        ax.set_xlabel("Loading value")
+        is_scaled = "scaled" in loadings_df.columns and loadings_df["scaled"].any()
+        ax.set_xlabel(
+            "Contribution (loading \u00d7 std)" if is_scaled else "Loading value"
+        )
 
-    plt.suptitle(
-        "Comparative Loadings by Broad Type\n"
-        "(small dots = individual regions,  large dot = cross-region mean)",
-        fontsize=12,
-    )
+    if is_scaled:
+        plt.suptitle(
+            "Scaled Contributions by Broad Type\n"
+            "(small dots = individual regions,  large dot = cross-region mean)",
+            fontsize=12,
+        )
+    else:
+        plt.suptitle(
+            "Comparative Loadings by Broad Type\n"
+            "(small dots = individual regions,  large dot = cross-region mean)",
+            fontsize=12,
+        )
     plt.tight_layout()
     if path is not None:
         plt.savefig(Path(path) / "AMBRIC_loadings_aggregate.svg")

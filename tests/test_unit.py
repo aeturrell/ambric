@@ -19,6 +19,7 @@ from ambric import (
     train_xgboost_annual,
 )
 from ambric.diagnostics import (
+    assemble_loadings_data,
     recession_indicator,
     rmse_national_quarterly,
     rmse_regions_annual,
@@ -257,6 +258,63 @@ class TestPrepDataForModelRun:
                 ],
             )
 
+    def test_region_column_order_matches_region_names(self, simulated_df):
+        """When one region has extra data (no lag), the columns of
+        y_a_r_extracted must still match the order of region_names, not
+        the alphabetical order that pandas pivot produces by default."""
+        df = simulated_df.copy()
+        region_names = sorted([x for x in df["region"].unique() if x != "uk"])
+        macro_names = [x for x in df["measure"].unique() if "macro" in x]
+        region_covariate_names = [
+            x for x in df["measure"].unique() if "regional_covar" in x
+        ]
+
+        # Reverse the region_names so they differ from alphabetical order
+        region_names = list(reversed(region_names))
+
+        # Extend the *first* region in our list with extra data (no lag)
+        target_region = region_names[0]
+        uk_dates = sorted(df.loc[df["measure"] == "gva_q_on_q", "datetime"].unique())
+        existing_dates = sorted(
+            df.loc[df["measure"] == "gva_q_on_4q", "datetime"].unique()
+        )
+        extra_dates = [d for d in uk_dates if d not in existing_dates]
+        extra_rows = pd.DataFrame(
+            {
+                "datetime": extra_dates,
+                "measure": "gva_q_on_4q",
+                "region": target_region,
+                "value": np.random.default_rng(99).normal(
+                    0.05, 0.01, size=len(extra_dates)
+                ),
+            }
+        )
+        df = pd.concat([df, extra_rows], ignore_index=True)
+
+        y_uk, y_a_r, Z_panel, macro, lag_qtrs = prep_data_for_model_run(
+            df,
+            macro_names=macro_names,
+            region_names=region_names,
+            region_covariate_names=region_covariate_names,
+        )
+
+        # Count trailing NaNs per column.  The target region (col 0) should
+        # have strictly fewer trailing NaNs than every other region, proving
+        # the extra data landed in the right column.
+        def _trailing_nan_count(col: np.ndarray) -> int:
+            if np.all(np.isnan(col)):
+                return len(col)
+            return int(np.argmax(~np.isnan(col[::-1])))
+
+        target_trailing = _trailing_nan_count(y_a_r[:, 0])
+        for col in range(1, y_a_r.shape[1]):
+            other_trailing = _trailing_nan_count(y_a_r[:, col])
+            assert target_trailing < other_trailing, (
+                f"{target_region} (col 0) has {target_trailing} trailing NaNs "
+                f"but {region_names[col]} (col {col}) has only "
+                f"{other_trailing}; extra data appears mis-ordered"
+            )
+
 
 # ── Ambric.__init__ validation ──────────────────────────────────────────────
 
@@ -429,3 +487,85 @@ class TestGenerateRealisticSimulatedData:
         assert "macro_1" in measures
         assert "regional_covar_00" in measures
         assert "regional_covar_01" in measures
+
+
+# ── assemble_loadings_data scaling ──────────────────────────────────────────
+
+
+class TestAssembleLoadingsDataScaling:
+    """Verify that stds scale loadings correctly in assemble_loadings_data."""
+
+    @pytest.fixture()
+    def mock_trace(self):
+        """Minimal ArviZ InferenceData with deterministic posterior values."""
+        import arviz as az
+        import xarray as xr
+
+        R, K, M = 2, 2, 1
+        # Use a single chain / single draw so mean == the value itself.
+        lambda_vals = np.array([[[0.5, -1.0], [2.0, 0.3]]])  # (1, R, K)
+        gamma_vals = np.array([[[0.4], [0.8]]])  # (1, R, M)
+        delta_vals = np.array([[1.5, -0.6]])  # (1, R)
+
+        posterior = xr.Dataset(
+            {
+                "Lambda": (["chain", "region", "factor"], lambda_vals),
+                "Gamma": (["chain", "region", "macro"], gamma_vals),
+                "delta_r": (["chain", "region"], delta_vals),
+            },
+            coords={
+                "chain": [0],
+                "region": list(range(R)),
+                "factor": list(range(K)),
+                "macro": list(range(M)),
+            },
+        )
+        # ArviZ expects a "draw" dimension; rename the single-element chain
+        # trick: expand with a draw dimension of length 1.
+        posterior = posterior.expand_dims("draw")
+
+        return az.InferenceData(posterior=posterior)
+
+    def test_unscaled_returns_raw_values(self, mock_trace):
+        df = assemble_loadings_data(
+            mock_trace,
+            region_names=["A", "B"],
+            macro_names=["gdp"],
+        )
+        # No scaling applied — factor_0 for region A should be raw 0.5
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_0")]
+        assert np.isclose(row["mean"].iloc[0], 0.5)
+        assert "scaled" in df.columns
+        assert not df["scaled"].any()
+
+    def test_scaled_multiplies_by_std(self, mock_trace):
+        factor_stds = np.array([2.0, 3.0])
+        macro_stds = np.array([0.5])
+        bridge_signal_stds = np.array([4.0, 5.0])
+
+        df = assemble_loadings_data(
+            mock_trace,
+            region_names=["A", "B"],
+            macro_names=["gdp"],
+            factor_stds=factor_stds,
+            macro_stds=macro_stds,
+            bridge_signal_stds=bridge_signal_stds,
+        )
+
+        # Factor 0 for region A: 0.5 * 2.0 = 1.0
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_0")]
+        assert np.isclose(row["mean"].iloc[0], 1.0)
+
+        # Factor 1 for region A: -1.0 * 3.0 = -3.0
+        row = df[(df["region"] == "A") & (df["loading_name"] == "factor_1")]
+        assert np.isclose(row["mean"].iloc[0], -3.0)
+
+        # Macro "gdp" for region B: 0.8 * 0.5 = 0.4
+        row = df[(df["region"] == "B") & (df["loading_name"] == "gdp")]
+        assert np.isclose(row["mean"].iloc[0], 0.4)
+
+        # Bridge signal for region B: -0.6 * 5.0 = -3.0
+        row = df[(df["region"] == "B") & (df["loading_name"] == "boost_signal")]
+        assert np.isclose(row["mean"].iloc[0], -3.0)
+
+        assert df["scaled"].all()

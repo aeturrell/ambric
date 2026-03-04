@@ -1098,7 +1098,9 @@ class Ambric:
         Separates data assembly from plotting so the returned frame can be
         inspected, exported, or passed to the companion plot methods.  The
         frame contains one row per (region, loading) combination with the
-        posterior mean and 94 % HDI bounds.
+        posterior mean and 94 % HDI bounds.  Loadings are scaled by the
+        standard deviation of their corresponding input variable so that
+        the three signal types are on a comparable *contribution* scale.
 
         Raises:
             ValueError: If the model has not been fitted yet.
@@ -1112,10 +1114,20 @@ class Ambric:
             raise ValueError(
                 "Model trace is not available. Fit the model before assembling loadings."
             )
+        factor_stds = np.std(self.factors, axis=0)
+        macro_stds = np.std(self.macro, axis=0)
+        bridge_signal_stds = (
+            np.std(self.bridge_signal, axis=0)
+            if self.bridge_signal is not None
+            else None
+        )
         return assemble_loadings_data(
             self.trace,
             region_names=self.region_names,
             macro_names=self.macro_names,
+            factor_stds=factor_stds,
+            macro_stds=macro_stds,
+            bridge_signal_stds=bridge_signal_stds,
         )
 
     def plot_loadings_by_region(self, path: Path | None = None) -> None:
