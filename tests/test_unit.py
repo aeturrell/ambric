@@ -257,6 +257,63 @@ class TestPrepDataForModelRun:
                 ],
             )
 
+    def test_region_column_order_matches_region_names(self, simulated_df):
+        """When one region has extra data (no lag), the columns of
+        y_a_r_extracted must still match the order of region_names, not
+        the alphabetical order that pandas pivot produces by default."""
+        df = simulated_df.copy()
+        region_names = sorted([x for x in df["region"].unique() if x != "uk"])
+        macro_names = [x for x in df["measure"].unique() if "macro" in x]
+        region_covariate_names = [
+            x for x in df["measure"].unique() if "regional_covar" in x
+        ]
+
+        # Reverse the region_names so they differ from alphabetical order
+        region_names = list(reversed(region_names))
+
+        # Extend the *first* region in our list with extra data (no lag)
+        target_region = region_names[0]
+        uk_dates = sorted(df.loc[df["measure"] == "gva_q_on_q", "datetime"].unique())
+        existing_dates = sorted(
+            df.loc[df["measure"] == "gva_q_on_4q", "datetime"].unique()
+        )
+        extra_dates = [d for d in uk_dates if d not in existing_dates]
+        extra_rows = pd.DataFrame(
+            {
+                "datetime": extra_dates,
+                "measure": "gva_q_on_4q",
+                "region": target_region,
+                "value": np.random.default_rng(99).normal(
+                    0.05, 0.01, size=len(extra_dates)
+                ),
+            }
+        )
+        df = pd.concat([df, extra_rows], ignore_index=True)
+
+        y_uk, y_a_r, Z_panel, macro, lag_qtrs = prep_data_for_model_run(
+            df,
+            macro_names=macro_names,
+            region_names=region_names,
+            region_covariate_names=region_covariate_names,
+        )
+
+        # Count trailing NaNs per column.  The target region (col 0) should
+        # have strictly fewer trailing NaNs than every other region, proving
+        # the extra data landed in the right column.
+        def _trailing_nan_count(col: np.ndarray) -> int:
+            if np.all(np.isnan(col)):
+                return len(col)
+            return int(np.argmax(~np.isnan(col[::-1])))
+
+        target_trailing = _trailing_nan_count(y_a_r[:, 0])
+        for col in range(1, y_a_r.shape[1]):
+            other_trailing = _trailing_nan_count(y_a_r[:, col])
+            assert target_trailing < other_trailing, (
+                f"{target_region} (col 0) has {target_trailing} trailing NaNs "
+                f"but {region_names[col]} (col {col}) has only "
+                f"{other_trailing}; extra data appears mis-ordered"
+            )
+
 
 # ── Ambric.__init__ validation ──────────────────────────────────────────────
 

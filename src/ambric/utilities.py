@@ -192,6 +192,7 @@ def prep_data_for_model_run(
             :,
         ]
         .pivot(index="datetime", columns="region", values="value")
+        .reindex(columns=region_names)
         .values
     )
     # If len(y_a_r_extracted) < len(y_uk_extracted), extend with nans
