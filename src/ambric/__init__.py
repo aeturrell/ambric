@@ -55,6 +55,7 @@ from xgboost import XGBRegressor
 
 from ambric.diagnostics import (
     assemble_loadings_data,
+    bands_indicator,
     live_recession_indicator,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
@@ -1204,7 +1205,36 @@ class Ambric:
             y_a_r_est_point,
             region_names=self.region_names,
             datetime_ts=self.datetime_ts,
-            lag_qtrs=self.lag_qtrs,
+        )
+        if path:
+            out_table.to_parquet(path / "recession_indicator.parquet")
+        return out_table
+
+    def bands_indicator(self, path: Path | None = None) -> pd.DataFrame:
+        """Produce a table indicating bands
+
+        Uses q-on-4q annual growth estimates at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
+
+        Raises:
+            ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the classification.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
+        _, _, y_a_r_est_point = trace_to_series(self.trace)
+        out_table = bands_indicator(
+            y_a_r_est_point,
+            region_names=self.region_names,
+            datetime_ts=self.datetime_ts,
         )
         if path:
             out_table.to_parquet(path / "recession_indicator.parquet")
