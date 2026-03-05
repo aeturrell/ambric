@@ -1238,6 +1238,93 @@ def plot_current_nowcast(
     plt.close()
 
 
+def bands_indicator(
+    y_nowcast: npt.NDArray[np.float64],
+    datetime_ts: pd.Series,
+    region_names: list[str],
+    bands: list[float] = [-1.5, -0.2, 0.2, 1.5],  # noqa: B006
+) -> pd.DataFrame:
+    """Classify each time period into growth bands based on successive values.
+
+    For each time point, pairs with its previous and next neighbours are
+    examined.  Each pair is assigned the *less extreme* of the two
+    individual band classifications (closer to ``"indeterminate"``).
+    When a point belongs to two pairs the *more extreme* pair
+    classification is kept.
+
+    Default bands and their labels:
+
+    * ``< -1.5`` -- strong recession
+    * ``>= -1.5`` and ``< -0.2`` -- recession
+    * ``>= -0.2`` and ``< 0.2`` -- indeterminate
+    * ``>= 0.2`` and ``< 1.5`` -- growth
+    * ``>= 1.5`` -- strong growth
+
+    Args:
+        y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
+        datetime_ts (pd.Series): Quarterly datetime index.
+        region_names (list[str]): Region names used as column headers.
+        bands (list[float]): Interior bin edges.
+            Defaults to ``[-1.5, -0.2, 0.2, 1.5]``.
+
+    Returns:
+        pd.DataFrame: Long-format frame with ``datetime``, ``region``, and
+            ``classification`` columns.
+    """
+    band_names = [
+        "strong recession",
+        "recession",
+        "indeterminate",
+        "growth",
+        "strong growth",
+    ]
+    center = len(band_names) // 2  # index of "indeterminate"
+
+    df = pd.DataFrame(data=y_nowcast, columns=region_names, index=datetime_ts)
+    df = df.reset_index().melt(
+        id_vars="datetime", var_name="region", value_name="value"
+    )
+
+    results = []
+    for region, group in df.groupby("region"):
+        group_sorted = group.sort_values("datetime").reset_index(drop=True)
+        values = group_sorted["value"].values
+        datetimes = group_sorted["datetime"].values
+        bin_idx = np.searchsorted(bands, values, side="right")
+        n = len(values)
+
+        for i in range(n):
+            pair_classes: list[int] = []
+            for j in (i - 1, i + 1):
+                if 0 <= j < n:
+                    a, b = bin_idx[i], bin_idx[j]
+                    da, db = abs(a - center), abs(b - center)
+                    if da < db:
+                        pair_classes.append(a)
+                    elif db < da:
+                        pair_classes.append(b)
+                    elif a == b:
+                        pair_classes.append(a)
+                    else:
+                        # equidistant on opposite sides → indeterminate
+                        pair_classes.append(center)
+
+            if pair_classes:
+                cls = max(pair_classes, key=lambda x: abs(x - center))
+            else:
+                cls = bin_idx[i]
+
+            results.append(
+                {
+                    "datetime": datetimes[i],
+                    "region": region,
+                    "classification": band_names[cls],
+                }
+            )
+
+    return pd.DataFrame(results)
+
+
 def recession_indicator(
     y_nowcast: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
@@ -1308,7 +1395,6 @@ def live_recession_indicator(
     y_nowcast: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    lag_qtrs: int,
 ) -> pd.DataFrame:
     """Return recession indicator for nowcast growth q-on-4q, pivoted wide.
 
@@ -1316,7 +1402,6 @@ def live_recession_indicator(
         y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
         datetime_ts (pd.Series): Quarterly datetime index.
         region_names (list[str]): Region names.
-        lag_qtrs (int): Number of quarters of publication lag.
 
     Returns:
         pd.DataFrame: Wide-format frame with ``datetime`` as index and one
