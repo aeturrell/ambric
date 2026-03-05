@@ -1240,7 +1240,7 @@ class Ambric:
             out_table.to_parquet(path / "bands_indicator.parquet")
         return out_table
 
-    def live_point_estimates(self, path: Path | None = None) -> pd.DataFrame:
+    def point_estimates_q_on_4q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast point estimates by region.
 
         Returns q-on-4q annual growth estimates (in percentage points,
@@ -1265,6 +1265,41 @@ class Ambric:
         df = (
             pd.DataFrame(
                 y_a_r_est_point,
+                index=self.datetime_ts,
+                columns=self.region_names,
+            )
+            * 100
+        ).round(2)
+        df.index.name = "datetime"
+        if path:
+            df.to_parquet(path / "point_estimates.parquet")
+        return df
+
+    def point_estimates_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
+        """Produce a table of nowcast point estimates by region.
+
+        Returns q-on-q annual growth estimates (in percentage points,
+        rounded to 2 d.p.) at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
+
+        Raises:
+            ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the point estimate.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
+        _, y_q_r_est_point, _ = trace_to_series(self.trace)
+        df = (
+            pd.DataFrame(
+                y_q_r_est_point,
                 index=self.datetime_ts,
                 columns=self.region_names,
             )
