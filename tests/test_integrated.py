@@ -60,7 +60,7 @@ def test_vanilla_run(mock_show) -> None:
     amb.plot_single_region_annual_estimate(region_name="region_00")
     amb.plot_estimated_regional_quarterly()
     amb.plot_current_nowcast()
-    out_df = amb.bands_indicator()
+    amb.bands_indicator()
     amb.live_recession_indicator()
     amb.live_point_estimates()
 

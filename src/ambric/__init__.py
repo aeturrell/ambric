@@ -1237,7 +1237,7 @@ class Ambric:
             datetime_ts=self.datetime_ts,
         )
         if path:
-            out_table.to_parquet(path / "recession_indicator.parquet")
+            out_table.to_parquet(path / "bands_indicator.parquet")
         return out_table
 
     def live_point_estimates(self, path: Path | None = None) -> pd.DataFrame:
