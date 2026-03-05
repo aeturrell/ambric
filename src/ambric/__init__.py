@@ -1232,7 +1232,7 @@ class Ambric:
             )
         _, _, y_a_r_est_point = trace_to_series(self.trace)
         out_table = bands_indicator(
-            y_a_r_est_point,
+            y_a_r_est_point * 100,
             region_names=self.region_names,
             datetime_ts=self.datetime_ts,
         )
