@@ -1272,7 +1272,7 @@ class Ambric:
         ).round(2)
         df.index.name = "datetime"
         if path:
-            df.to_parquet(path / "point_estimates.parquet")
+            df.to_parquet(path / "point_estimates_q_on_4q.parquet")
         return df
 
     def point_estimates_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
@@ -1307,7 +1307,7 @@ class Ambric:
         ).round(2)
         df.index.name = "datetime"
         if path:
-            df.to_parquet(path / "point_estimates.parquet")
+            df.to_parquet(path / "point_estimates_q_on_q.parquet")
         return df
 
 
