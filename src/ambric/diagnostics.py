@@ -1242,7 +1242,7 @@ def bands_indicator(
     y_nowcast: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    bands: list[float] = [-1.5, -0.2, 0.2, 1.5],  # noqa: B006
+    bands: list[float] = [-1, -0.2, 0.2, 1],  # noqa: B006
 ) -> pd.DataFrame:
     """Classify each time period into growth bands based on successive values.
 
