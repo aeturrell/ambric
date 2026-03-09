@@ -124,7 +124,7 @@ def precommit(session: nox.Session) -> None:
     session.run_install(
         "uv",
         "sync",
-        "--extra=dev",
+        "--group=dev",
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run("pre-commit", *args)
@@ -139,7 +139,7 @@ def typeguard(session: nox.Session) -> None:
     session.run_install(
         "uv",
         "sync",
-        "--extra=dev",
+        "--group=dev",
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run_install("uv", "pip", "install", "-e", ".")
@@ -153,7 +153,7 @@ def ty(session: nox.Session) -> None:
     session.run_install(
         "uv",
         "sync",
-        "--extra=dev",
+        "--group=dev",
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run_install("uv", "pip", "install", "-e", ".")
@@ -169,7 +169,7 @@ def xdoctest(session: nox.Session) -> None:
     session.run_install(
         "uv",
         "sync",
-        "--extra=dev",
+        "--group=dev",
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run_install("uv", "pip", "install", "-e", ".")
