@@ -606,9 +606,11 @@ def assemble_loadings_data(
         or bridge_signal_stds is not None
     )
 
+    posterior = trace.posterior  # ty: ignore[unresolved-attribute]
+
     # --- Factor loadings: Lambda has shape (R, K) in the model ---
     lambda_mean: npt.NDArray[np.float64] = (
-        trace.posterior["Lambda"].mean(dim=("chain", "draw")).values
+        posterior["Lambda"].mean(dim=("chain", "draw")).values
     )  # (R, K)
     lambda_hdi: npt.NDArray[np.float64] = az.hdi(
         trace, var_names=["Lambda"], hdi_prob=0.94
@@ -632,7 +634,7 @@ def assemble_loadings_data(
 
     # --- Macro loadings: Gamma has shape (R, M) in the model ---
     gamma_mean: npt.NDArray[np.float64] = (
-        trace.posterior["Gamma"].mean(dim=("chain", "draw")).values
+        posterior["Gamma"].mean(dim=("chain", "draw")).values
     )  # (R, M)
     gamma_hdi: npt.NDArray[np.float64] = az.hdi(
         trace, var_names=["Gamma"], hdi_prob=0.94
@@ -659,7 +661,7 @@ def assemble_loadings_data(
 
     # --- Bridge signal loadings: delta_r has shape (R,) in the model ---
     delta_mean: npt.NDArray[np.float64] = (
-        trace.posterior["delta_r"].mean(dim=("chain", "draw")).values
+        posterior["delta_r"].mean(dim=("chain", "draw")).values
     )  # (R,)
     delta_hdi: npt.NDArray[np.float64] = az.hdi(
         trace, var_names=["delta_r"], hdi_prob=0.94
@@ -1280,7 +1282,7 @@ def bands_indicator(
     ]
     center = len(band_names) // 2  # index of "indeterminate"
 
-    df = pd.DataFrame(data=y_nowcast, columns=region_names, index=datetime_ts)
+    df = pd.DataFrame(data=y_nowcast, columns=pd.Index(region_names), index=datetime_ts)
     df = df.reset_index().melt(
         id_vars="datetime", var_name="region", value_name="value"
     )
@@ -1347,7 +1349,7 @@ def recession_indicator(
     """
     results = []
 
-    df = pd.DataFrame(data=y_nowcast, columns=region_names, index=datetime_ts)
+    df = pd.DataFrame(data=y_nowcast, columns=pd.Index(region_names), index=datetime_ts)
     df = df.reset_index().melt(
         id_vars="datetime", var_name="region", value_name="value"
     )

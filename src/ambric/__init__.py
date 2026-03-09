@@ -410,7 +410,9 @@ def fit_bridge_equation(
 
         def _bridge_objective(theta_vec: npt.NDArray) -> float:
             theta1, theta2 = theta_vec
-            weights = _almon_weights(theta1, theta2, n_lags=4)
+            weights = _almon_weights(
+                theta1, theta2, n_lags=4
+            )  # ty: ignore[invalid-argument-type]
 
             X_rows = []
             y_rows = []
@@ -603,7 +605,10 @@ def build_ambric_model(
             "factor_ar_prior",
             -0.5
             * pt.sum(
-                ((factors_latent[1:] - phi_f * factors_latent[:-1]) / sigma_f) ** 2
+                (
+                    (factors_latent[1:] - phi_f * factors_latent[:-1]) / sigma_f
+                )  # ty: ignore[not-subscriptable]
+                ** 2
                 + 2 * pt.log(sigma_f)
             ),
         )
@@ -614,9 +619,9 @@ def build_ambric_model(
 
         # --- Exogenous mean: factors + macro + bridge ---
         mu_exog = (
-            pt.dot(factors_latent, Lambda.T)
-            + pt.dot(macro, Gamma.T)
-            + bridge_data * delta_r
+            pt.dot(factors_latent, Lambda.T)  # ty: ignore[unresolved-attribute]
+            + pt.dot(macro, Gamma.T)  # ty: ignore[unresolved-attribute]
+            + bridge_data * delta_r  # ty: ignore[unsupported-operator]
         )
 
         # --- Regional weights for UK aggregation ---
@@ -636,7 +641,14 @@ def build_ambric_model(
             -0.5
             * pt.sum(
                 (
-                    (y_reg[1:] - phi_r * y_reg[:-1] - (1 - phi_r) * mu_exog[1:])
+                    (
+                        y_reg[1:]
+                        - phi_r * y_reg[:-1]
+                        - (1 - phi_r)
+                        * mu_exog[
+                            1:
+                        ]  # ty: ignore[not-subscriptable, unsupported-operator]
+                    )
                     / sigma_eps
                 )
                 ** 2
@@ -646,17 +658,22 @@ def build_ambric_model(
 
         pm.Potential(
             "regional_init",
-            -0.5 * pt.sum(((y_reg[0] - mu_exog[0]) / sigma_eps) ** 2),
+            -0.5
+            * pt.sum(
+                ((y_reg[0] - mu_exog[0]) / sigma_eps)
+                ** 2  # ty: ignore[not-subscriptable]
+            ),
         )
 
         # --- Constraint: UK Quarterly Growth ---
-        mu_uk = pt.sum(y_reg * w, axis=1)
+        mu_uk = pt.sum(y_reg * w, axis=1)  # ty: ignore[unsupported-operator]
         pm.StudentT("obs_uk", nu=nu_uk, mu=mu_uk, sigma=sigma_uk, observed=y_uk)
 
         # --- Constraint: Annual Regional Growth (temporal convolution) ---
         y_lags = [y_reg * OMEGA[0]]
         for j in range(1, 7):
-            shifted = pt.concatenate([pt.zeros((j, R)), y_reg[:-j, :]], axis=0)
+            y_reg_trimmed = y_reg[:-j, :]  # ty: ignore[not-subscriptable]
+            shifted = pt.concatenate([pt.zeros((j, R)), y_reg_trimmed], axis=0)
             y_lags.append(shifted * OMEGA[j])
 
         mu_annual = pt.sum(pt.stack(y_lags), axis=0)
@@ -916,7 +933,7 @@ class Ambric:
             )
 
         save_path = Path(path) / f"model_trace_{self.model_id}.nc"
-        self.trace.to_netcdf(save_path)
+        self.trace.to_netcdf(str(save_path))
         logger.info(f"Model trace saved to {save_path}")
 
     def populate_results(self) -> pd.DataFrame:
@@ -939,7 +956,9 @@ class Ambric:
         y_q_uk_est_point, _, y_a_r_est_point = trace_to_series(self.trace)
 
         annual_regional_ests = pd.DataFrame(
-            index=self.datetime_ts, columns=self.region_names, data=y_a_r_est_point
+            index=self.datetime_ts,
+            columns=pd.Index(self.region_names),
+            data=y_a_r_est_point,
         )
         annual_regional_long_est = pd.melt(
             annual_regional_ests.reset_index(), id_vars="datetime", var_name="region"
@@ -949,7 +968,7 @@ class Ambric:
         annual_national_ests = pd.DataFrame(
             index=self.datetime_ts,
             data=y_q_uk_est_point,
-            columns=[self.aggregation_region],
+            columns=pd.Index([self.aggregation_region]),
         )
         annual_national_ests_long = pd.melt(
             annual_national_ests.reset_index(), id_vars="datetime", var_name="region"
@@ -1115,6 +1134,10 @@ class Ambric:
             raise ValueError(
                 "Model trace is not available. Fit the model before assembling loadings."
             )
+        if self.factors is None:
+            raise ValueError(
+                "Factors are not available. Fit the model before assembling loadings."
+            )
         factor_stds = np.std(self.factors, axis=0)
         macro_stds = np.std(self.macro, axis=0)
         bridge_signal_stds = (
@@ -1266,7 +1289,7 @@ class Ambric:
             pd.DataFrame(
                 y_a_r_est_point,
                 index=self.datetime_ts,
-                columns=self.region_names,
+                columns=pd.Index(self.region_names),
             )
             * 100
         ).round(2)
@@ -1301,7 +1324,7 @@ class Ambric:
             pd.DataFrame(
                 y_q_r_est_point,
                 index=self.datetime_ts,
-                columns=self.region_names,
+                columns=pd.Index(self.region_names),
             )
             * 100
         ).round(2)
@@ -1309,6 +1332,46 @@ class Ambric:
         if path:
             df.to_parquet(path / "point_estimates_q_on_q.parquet")
         return df
+
+    def to_index_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
+        """Produce a table of nowcast index.
+
+        Returns index to earliest data point (rounded to 2 d.p.) at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
+
+        Raises:
+            ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the point estimate.
+        """
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
+        _, y_q_r_est_point, _ = trace_to_series(self.trace)
+        df_q_on_q = (
+            pd.DataFrame(
+                y_q_r_est_point,
+                index=self.datetime_ts,
+                columns=pd.Index(self.region_names),
+            )
+            * 100
+        ).round(2)
+        df_q_on_q.index.name = "datetime"
+        start_value = 100.0
+        # Convert percentage growth rates to an index:
+        # growth factors = 1 + rate/100, then cumulative product scaled by start_value
+        df_index = start_value * (1 + df_q_on_q / 100).cumprod()
+        df_index = df_index.round(2)
+
+        if path:
+            df_index.to_parquet(path / "index_estimates_q_on_q.parquet")
+        return df_index
 
 
 def run_out_of_sample_exercise(

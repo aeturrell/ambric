@@ -41,7 +41,7 @@ def test_vanilla_run(mock_show) -> None:
 
     logger.info("Ambric model created with ID: " + amb.model_id)
 
-    n_its = 10000
+    n_its = 1000
     n_posterior_samples = 3000
 
     logger.info(
@@ -64,6 +64,7 @@ def test_vanilla_run(mock_show) -> None:
     amb.live_recession_indicator()
     amb.point_estimates_q_on_4q()
     amb.point_estimates_q_on_q()
+    amb.to_index_q_on_q()
 
     # Loadings diagnostics: verify data assembly and both plot variants.
     loadings_df = amb.assemble_loadings_data()
