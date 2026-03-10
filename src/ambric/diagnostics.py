@@ -1204,7 +1204,7 @@ def plot_current_nowcast(
         sharey=True,
     )
     axes = axes.flatten()
-    y_lim = np.nanmax(y_annual) * 1.3
+    y_lim = np.nanmax(t_y_annual) * 1.2
     for i, r in enumerate(range(R)):
         if i == 0:
             axes[i].annotate(
@@ -1229,7 +1229,7 @@ def plot_current_nowcast(
         axes[i].xaxis.set_minor_locator(mdates.YearLocator())
     for j in range(R, len(axes)):
         axes[j].set_visible(False)
-    plt.suptitle("Nowcast: Regional Annual Growth")
+    plt.suptitle("Nowcast: q-on-4q growth vs annual outturns")
     fig.autofmt_xdate()
     plt.tight_layout()
     if path is not None:

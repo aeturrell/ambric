@@ -176,6 +176,61 @@ def test_vanilla_run_one_region_no_lag(mock_show) -> None:
     mock_show.assert_called()
 
 
+def test_early_covariate_truncation() -> None:
+    """When macro/aggregate data starts before regional data, __init__
+    should truncate the early rows so datetime_ts begins at the earliest
+    regional datetime."""
+    n_factors = 2
+    df = generate_realistic_simulated_data(n_factors=n_factors)
+
+    aggregation_region = "uk"
+    region_names = [x for x in df["region"].unique() if x != aggregation_region]
+    macro_names = [x for x in df["measure"].unique() if "macro" in x]
+    region_covariate_names = [
+        x for x in df["measure"].unique() if "regional_covar" in x
+    ]
+
+    # Add extra early quarters of macro/aggregate data that predate regional data
+    earliest_regional = df.loc[
+        (df["region"].isin(region_names)) & (df["measure"] == "gva_q_on_4q"),
+        "datetime",
+    ].min()
+    early_dates = pd.date_range(
+        end=earliest_regional - pd.offsets.QuarterEnd(), periods=4, freq="QE"
+    )
+    early_rows = []
+    for dt in early_dates:
+        early_rows.append(
+            {"datetime": dt, "measure": "gva_q_on_q", "region": "uk", "value": 0.01}
+        )
+        for m in macro_names:
+            early_rows.append(
+                {"datetime": dt, "measure": m, "region": "uk", "value": 0.0}
+            )
+        for rc in region_covariate_names:
+            for rn in region_names:
+                early_rows.append(
+                    {"datetime": dt, "measure": rc, "region": rn, "value": 0.0}
+                )
+    df_with_early = pd.concat([pd.DataFrame(early_rows), df], ignore_index=True)
+
+    # Sanity check: the augmented data starts earlier than regional data
+    assert df_with_early["datetime"].min() < earliest_regional
+
+    amb = Ambric(
+        df_with_early,
+        macro_names,
+        region_names,
+        region_covariate_names,
+        n_factors=n_factors,
+    )
+
+    # After truncation, datetime_ts should start at the earliest regional date
+    assert amb.datetime_ts.min() == earliest_regional
+    # No data before earliest_regional should remain
+    assert amb.df["datetime"].min() >= earliest_regional
+
+
 @patch("matplotlib.pyplot.show")
 def test_pseudo_realtime_directly(mock_show) -> None:
     """Direct function to run realtime simulation."""

@@ -717,7 +717,6 @@ class Ambric:
             region_measure: Regional measure, q-on-4q growth rate.
         """
         logger.info("Initialising ambric model.")
-
         required_columns = ["datetime", "measure", "region", "value"]
         for col in required_columns:
             if col not in df.columns:
@@ -744,7 +743,16 @@ class Ambric:
         ]
         if missing_regions:
             raise ValueError(f"Missing regions from dataframe: {missing_regions}")
-
+        # Cut out any covariates that begin before the relevant regional variables
+        earliest_regional_datetime = df.loc[
+            ((df["region"].isin(region_names)) & (df["measure"] == region_measure)),
+            "datetime",
+        ].min()
+        if any(df["datetime"] < earliest_regional_datetime):
+            logger.info(
+                f"Data points from before first regional data points detected; truncating start of data to {earliest_regional_datetime.strftime('%Y-%b')}"
+            )
+            df = df.loc[df["datetime"] >= earliest_regional_datetime, :].copy()
         (y_uk, y_annual, Z_panel, macro, lag_qrtrs) = prep_data_for_model_run(
             df,
             macro_names=macro_names,
