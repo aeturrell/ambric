@@ -1527,3 +1527,4 @@ def plot_seasonally_adjusted_q_on_q_growth(
         if path:
             clean_region = re.sub(r"\s+", "", region)
             plt.savefig(path / f"{clean_region}_sa_q_on_q.svg")
+        plt.close()
