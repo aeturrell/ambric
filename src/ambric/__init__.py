@@ -41,6 +41,7 @@ import arviz as az
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+import pydemetra as jd
 import pymc as pm
 import pytensor.tensor as pt
 from loguru import logger
@@ -63,6 +64,7 @@ from ambric.diagnostics import (
     plot_loadings_by_region,
     plot_national_quarterly_vs_implied,
     plot_regional_annual_estimate,
+    plot_seasonally_adjusted_q_on_q_growth,
     plot_single_region_annual_estimate,
     trace_to_series,
 )
@@ -410,9 +412,7 @@ def fit_bridge_equation(
 
         def _bridge_objective(theta_vec: npt.NDArray) -> float:
             theta1, theta2 = theta_vec
-            weights = _almon_weights(
-                theta1, theta2, n_lags=4
-            )  # ty: ignore[invalid-argument-type]
+            weights = _almon_weights(theta1, theta2, n_lags=4)
 
             X_rows = []
             y_rows = []
@@ -601,16 +601,12 @@ def build_ambric_model(
 
         factors_latent = pm.Normal("factors_latent", mu=0, sigma=1, shape=(T, K))
 
+        f_curr = factors_latent[1:]  # ty: ignore[not-subscriptable]
+        f_prev = factors_latent[:-1]  # ty: ignore[not-subscriptable]
         pm.Potential(
             "factor_ar_prior",
             -0.5
-            * pt.sum(
-                (
-                    (factors_latent[1:] - phi_f * factors_latent[:-1]) / sigma_f
-                )  # ty: ignore[not-subscriptable]
-                ** 2
-                + 2 * pt.log(sigma_f)
-            ),
+            * pt.sum(((f_curr - phi_f * f_prev) / sigma_f) ** 2 + 2 * pt.log(sigma_f)),
         )
 
         # --- Factor observation model ---
@@ -642,12 +638,10 @@ def build_ambric_model(
             * pt.sum(
                 (
                     (
-                        y_reg[1:]
-                        - phi_r * y_reg[:-1]
-                        - (1 - phi_r)
-                        * mu_exog[
-                            1:
-                        ]  # ty: ignore[not-subscriptable, unsupported-operator]
+                        y_reg[1:]  # ty: ignore[not-subscriptable]
+                        - phi_r * y_reg[:-1]  # ty: ignore[not-subscriptable]
+                        - (1 - phi_r)  # ty: ignore[unsupported-operator]
+                        * mu_exog[1:]
                     )
                     / sigma_eps
                 )
@@ -660,8 +654,8 @@ def build_ambric_model(
             "regional_init",
             -0.5
             * pt.sum(
-                ((y_reg[0] - mu_exog[0]) / sigma_eps)
-                ** 2  # ty: ignore[not-subscriptable]
+                ((y_reg[0] - mu_exog[0]) / sigma_eps)  # ty: ignore[not-subscriptable]
+                ** 2
             ),
         )
 
@@ -1372,6 +1366,95 @@ class Ambric:
         if path:
             df_index.to_parquet(path / "index_estimates_q_on_q.parquet")
         return df_index
+
+    def seasonally_adjusted_index_and_growth_by_region(
+        self, path: Path | None = None
+    ) -> pd.DataFrame:
+        """Produce seasonally adjusted index and q-on-q growth rates
+
+        Returns data to earliest data point (rounded to 2 d.p.) at quarterly frequency.
+
+        Args:
+            path (Path | None): Directory to save the table as Parquet. When
+                ``None`` no file is written.
+
+        Raises:
+            ValueError: If model not fitted.
+
+        Returns:
+            pd.DataFrame: Wide-format table with datetime index and one
+                column per region containing the point estimate.
+        """
+        indices = self.to_index_q_on_q()
+        # seasonal adjustment needs a period index
+        indices.index = pd.to_datetime(indices.index).to_period()
+        # Seasonal adjustment here
+        spec = jd.x13_spec("rsa5c")
+        # Force log transformation (no automatic detection)
+        spec["regarima"]["transform"]["fn"] = "LOG"
+
+        # Disable transitory component (TC) outlier detection
+        spec["regarima"]["outlier"]["outliers"] = [
+            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
+        ]
+        # Disable trading day regressors (suitable for quarterly data)
+        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
+        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
+        spec = jd.x13_spec("rsa5c")
+        # Force log transformation (no automatic detection)
+        spec["regarima"]["transform"]["fn"] = "LOG"
+
+        # Disable transitory component (TC) outlier detection
+        spec["regarima"]["outlier"]["outliers"] = [
+            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
+        ]
+        # Disable trading day regressors (suitable for quarterly data)
+        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
+        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
+        spec = jd.x13_spec("rsa5c")
+        # Force log transformation (no automatic detection)
+        spec["regarima"]["transform"]["fn"] = "LOG"
+
+        # Disable transitory component (TC) outlier detection
+        spec["regarima"]["outlier"]["outliers"] = [
+            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
+        ]
+
+        # Disable trading day regressors (suitable for quarterly data)
+        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
+        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
+
+        def extract_into_df(ts_in: pd.Series, region: str, type: str):
+            new_df = pd.DataFrame(ts_in).copy()
+            new_df["region"] = region
+            new_df["type"] = type
+            return new_df
+
+        df_sa_trend_orig = pd.DataFrame()
+        for region in list(indices.columns):
+            ts_here = indices.loc[:, region].copy()
+            result = jd.x13(indices.loc[:, region], spec)
+            res = result["result"]  # ty: ignore[not-subscriptable]
+            sa = res["final"]["d11final"]  # seasonally adjusted series
+            trend = res["final"]["d12final"]  # trend
+            # seasonal = result["result"]["final"]["d16"]  # seasonal component
+            sa = extract_into_df(sa, region, "seasonally_adjusted").rename(
+                columns={0: "value"}
+            )
+            trend = extract_into_df(trend, region, "trend").rename(columns={0: "value"})
+            # seasonal = extract_into_df(seasonal, region, "seasonal").rename(columns={0:"value"})
+            ts_here = extract_into_df(ts_here, region, "estimate").rename(
+                columns={region: "value"}
+            )
+            df_sa_trend_orig = pd.concat([df_sa_trend_orig, ts_here, sa, trend], axis=0)
+        df_sa_trend_orig["q_on_q"] = 100 * df_sa_trend_orig.groupby(
+            ["region", "type"]
+        ).transform("pct_change")
+        if path:
+            df_sa_trend_orig.to_parquet(path / "sa_q_on_q.parquet")
+
+        plot_seasonally_adjusted_q_on_q_growth(df_sa_trend_orig, path)
+        return df_sa_trend_orig
 
 
 def run_out_of_sample_exercise(
