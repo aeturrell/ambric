@@ -1,6 +1,7 @@
 # -----------------------------------------------------------------------------
 # Plot Settings
 # -----------------------------------------------------------------------------
+import re
 from importlib.resources import files
 from pathlib import Path
 
@@ -460,7 +461,8 @@ def plot_single_region_annual_estimate(
     plt.suptitle("Annual q-on-4q Regional Growth: True vs Estimated")
     plt.tight_layout()
     if path is not None:
-        plt.savefig(Path(path) / f"AMBRIC_annual_{region_names[region_idx]}.svg")
+        clean_region = re.sub(r"\s+", "", region_names[region_idx])
+        plt.savefig(Path(path) / f"AMBRIC_annual_{clean_region}.svg")
     else:
         plt.show()
     plt.close()
@@ -1153,9 +1155,8 @@ def plot_out_of_sample_nowcasts(
         )
         ax.set_ylim(-y_max, y_max)
         if path is not None:
-            plt.savefig(
-                path / f"out_of_sample_nowcast_{region.lower().replace(' ', '_')}.svg"
-            )
+            clean_region = re.sub(r"\s+", "", region)
+            plt.savefig(path / f"out_of_sample_nowcast_{clean_region}.svg")
         else:
             plt.show()
         plt.close()
@@ -1478,3 +1479,39 @@ def out_of_sample_classification_performance_table(
     if path:
         summary_df.to_csv(path / "oos_classification_performance.csv")
     return summary_df
+
+
+def plot_seasonally_adjusted_q_on_q_growth(
+    df_sa_trend_orig: pd.DataFrame, path: Path | None
+) -> None:
+    """_summary_
+
+    Args:
+        df_sa_trend_orig (pd.DataFrame): _description_
+    """
+    for region in df_sa_trend_orig["region"].unique():
+        cut_q_on_q_region = df_sa_trend_orig.loc[
+            df_sa_trend_orig["region"] == region, :
+        ].copy()
+        cut_q_on_q_region = cut_q_on_q_region.pivot(
+            columns="type", values="q_on_q"
+        ).copy()
+        cut_q_on_q_region.index = cut_q_on_q_region.index.to_timestamp()
+        fig, ax = plt.subplots()
+        ax.plot(
+            cut_q_on_q_region["estimate"], color="k", zorder=1, lw=2.3, label="estimate"
+        )
+        ax.plot(
+            cut_q_on_q_region["seasonally_adjusted"],
+            alpha=0.8,
+            lw=1.3,
+            ls="dashed",
+            label="seasonally adjusted",
+        )
+        ax.plot(cut_q_on_q_region["trend"], lw=1.8, alpha=0.8, label="trend")
+        ax.axhline(0, color="k", alpha=0.4, zorder=0, lw=0.4)
+        ax.set_title(f"Growth for {region}, % quarter-on-quarter")
+        ax.legend(frameon=False)
+        if path:
+            clean_region = re.sub(r"\s+", "", region)
+            plt.savefig(path / f"{clean_region}_sa_q_on_q.svg")

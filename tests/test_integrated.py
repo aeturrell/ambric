@@ -65,6 +65,7 @@ def test_vanilla_run(mock_show) -> None:
     amb.point_estimates_q_on_4q()
     amb.point_estimates_q_on_q()
     amb.to_index_q_on_q()
+    amb.seasonally_adjusted_index_and_growth_by_region()
 
     # Loadings diagnostics: verify data assembly and both plot variants.
     loadings_df = amb.assemble_loadings_data()
