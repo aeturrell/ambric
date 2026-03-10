@@ -1230,7 +1230,7 @@ class Ambric:
     def bands_indicator(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table indicating bands
 
-        Uses q-on-4q annual growth estimates at quarterly frequency.
+        Uses seasonally adjusted q-on-q growth estimates at quarterly frequency.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1247,12 +1247,20 @@ class Ambric:
             raise ValueError(
                 "Model trace is not available. Fit the model before calling this method."
             )
-        _, _, y_a_r_est_point = trace_to_series(self.trace)
+        df_sa_trend_orig = self.seasonally_adjusted_index_and_growth_by_region()
+        df_sa_trend_orig = df_sa_trend_orig.loc[
+            df_sa_trend_orig["type"] == "trend", ["q_on_q", "region"]
+        ].copy()
+        long_format = df_sa_trend_orig.pivot(columns="region", values="q_on_q")
+        long_format = long_format[self.region_names]
+        # First row is NaN from pct_change; drop it and align datetime_ts.
+        long_format = long_format.iloc[1:]
         out_table = bands_indicator(
-            y_a_r_est_point * 100,
+            np.array(long_format.values),
             region_names=self.region_names,
-            datetime_ts=self.datetime_ts,
+            datetime_ts=self.datetime_ts.iloc[1:],
         )
+
         if path:
             out_table.to_parquet(path / "bands_indicator.parquet")
         return out_table

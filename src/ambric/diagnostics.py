@@ -1245,38 +1245,37 @@ def bands_indicator(
     y_nowcast: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
-    bands: list[float] = [-1.5, -0.2, 0.2, 1.5],  # noqa: B006
+    bands: list[float] = [-0.8, -0.1, 0.1, 0.8],  # noqa: B006
 ) -> pd.DataFrame:
-    """Classify each time period into growth bands based on successive values.
+    """Classify each time period into growth bands based on successive pairs.
 
-    For each time point, pairs with its previous and next neighbours are
-    examined.  Each pair is assigned the *less extreme* of the two
-    individual band classifications (closer to ``"indeterminate"``).
-    When a point belongs to two pairs the *more extreme* pair
-    classification is kept.
+    For each period from the second onwards, the pair (previous, current) is
+    examined and the *least extreme* of the two individual band
+    classifications (closer to ``"indeterminate"``) is assigned.  The first
+    period receives no classification (``NaN``).
 
     Default bands and their labels:
 
-    * ``< -1.5`` -- strong recession
-    * ``>= -1.5`` and ``< -0.2`` -- recession
-    * ``>= -0.2`` and ``< 0.2`` -- indeterminate
-    * ``>= 0.2`` and ``< 1.5`` -- growth
-    * ``>= 1.5`` -- strong growth
+    * ``< -0.8`` -- strong contraction
+    * ``>= -0.8`` and ``< -0.1`` -- contraction
+    * ``>= -0.1`` and ``< 0.1`` -- indeterminate
+    * ``>= 0.1`` and ``< 0.8`` -- growth
+    * ``>= 0.8`` -- strong growth
 
     Args:
         y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
         datetime_ts (pd.Series): Quarterly datetime index.
         region_names (list[str]): Region names used as column headers.
         bands (list[float]): Interior bin edges.
-            Defaults to ``[-1.5, -0.2, 0.2, 1.5]``.
+            Defaults to ``[-0.8, -0.1, 0.1, 0.8]``.
 
     Returns:
         pd.DataFrame: Long-format frame with ``datetime``, ``region``, and
             ``classification`` columns.
     """
     band_names = [
-        "strong recession",
-        "recession",
+        "strong contraction",
+        "contraction",
         "indeterminate",
         "growth",
         "strong growth",
@@ -1296,26 +1295,39 @@ def bands_indicator(
         bin_idx = np.searchsorted(bands, values, side="right")
         n = len(values)
 
-        for i in range(n):
-            pair_classes: list[int] = []
-            for j in (i - 1, i + 1):
-                if 0 <= j < n:
-                    a, b = bin_idx[i], bin_idx[j]
-                    da, db = abs(a - center), abs(b - center)
-                    if da < db:
-                        pair_classes.append(a)
-                    elif db < da:
-                        pair_classes.append(b)
-                    elif a == b:
-                        pair_classes.append(a)
-                    else:
-                        # equidistant on opposite sides → indeterminate
-                        pair_classes.append(center)
+        # First period has no predecessor, so no classification.
+        results.append(
+            {
+                "datetime": datetimes[0],
+                "region": region,
+                "classification": np.nan,
+            }
+        )
 
-            if pair_classes:
-                cls = max(pair_classes, key=lambda x: abs(x - center))
+        for i in range(1, n):
+            # If either value in the pair is NaN, no valid classification.
+            if np.isnan(values[i - 1]) or np.isnan(values[i]):
+                results.append(
+                    {
+                        "datetime": datetimes[i],
+                        "region": region,
+                        "classification": np.nan,
+                    }
+                )
+                continue
+
+            prev, curr = bin_idx[i - 1], bin_idx[i]
+            d_prev, d_curr = abs(prev - center), abs(curr - center)
+            # Take the least extreme (closest to indeterminate).
+            if d_prev < d_curr:
+                cls = prev
+            elif d_curr < d_prev:
+                cls = curr
+            elif prev == curr:
+                cls = prev
             else:
-                cls = bin_idx[i]
+                # Equidistant on opposite sides → indeterminate.
+                cls = center
 
             results.append(
                 {
