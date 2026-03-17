@@ -109,6 +109,54 @@ def quarter_differences(ts_one: pd.Series, time: pd.Timestamp) -> pd.Series:
     return quarters_ts - quarter_time
 
 
+def to_index(series: pd.Series) -> pd.Series:
+    """Used in generating unified out-of-sample time series that have been trend-adjusted.
+
+    Args:
+        series (pd.Series): Regional series in (estimates of q-on-q growth rates)
+
+    Returns:
+        pd.Series: Index version.
+    """
+    if not isinstance(series.index, pd.DatetimeIndex):
+        raise TypeError("Expected DatetimeIndex")
+    series.index = series.index.to_period()
+    series = 100 * (1 + series).cumprod() / (1 + series.iloc[0])
+    return series
+
+
+def extract_components(series: pd.Series) -> pd.DataFrame:
+    """Extracts trend and seasonal series from given regional time series.
+
+    Args:
+        series (pd.Series): Index for a single region (has period index.)
+
+    Returns:
+        pd.DataFrame: Original estimates, trend, and sa with period index.
+    """
+    series = to_index(series)
+    spec = jd.x13_spec("rsa5c")
+    # Force log transformation (no automatic detection)
+    spec["regarima"]["transform"]["fn"] = "LOG"
+
+    # Disable transitory component (TC) outlier detection
+    spec["regarima"]["outlier"]["outliers"] = [
+        o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
+    ]
+    # Disable trading day regressors (suitable for quarterly data)
+    spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
+    spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
+    result = jd.x13(series, spec)
+    res = result["result"]  # ty: ignore[not-subscriptable]
+    sa = res["final"]["d11final"]  # seasonally adjusted series
+    trend = res["final"]["d12final"]  # trend
+    # seasonal = result["result"]["final"]["d16"]  # seasonal component
+    df = pd.DataFrame(series).rename(columns={"value": "estimate"})
+    df["seasonally_adjusted"] = sa
+    df["trend"] = trend
+    return df
+
+
 # =============================================================================
 # Helper Functions: Imputation & Factor Extraction
 # =============================================================================
@@ -1641,3 +1689,26 @@ def run_out_of_sample_exercise(
         ].copy()
         df_results = pd.concat([df_results, est_and_orig_df], ignore_index=True)
     return df_results
+
+
+def trend_adjust_out_of_sample_results(
+    df_results: pd.DataFrame, path: Path | None = None, quarters_to_pub: float = 6.0
+):
+    df = df_results.loc[
+        (df_results["measure"] == "q_on_q")
+        & (df_results["quarters_to_publication"] == quarters_to_pub)
+    ].copy()
+    df_trend = pd.DataFrame()
+    for region in list(df["region"].unique()):
+        series = df.loc[df["region"] == region, ["datetime", "value"]].set_index(
+            "datetime"
+        )["value"]
+        series = series.sort_index()
+        df_regional = extract_components(series)
+        df_regional = df_regional.pct_change(1) * 100
+        df_regional["region"] = region
+        df_regional["measure"] = df["measure"].iloc[0]  # This is always the same
+        df_trend = pd.concat([df_trend, df_regional], axis=0)
+    if path:
+        df_trend.to_parquet(path / "trend_q_on_q.parquet")
+    return df_trend
