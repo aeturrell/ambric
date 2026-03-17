@@ -955,8 +955,15 @@ class Ambric:
             raise ValueError(
                 "Model trace is not available. Fit the model before populating results."
             )
-        y_q_uk_est_point, _, y_a_r_est_point = trace_to_series(self.trace)
-
+        y_q_uk_est_point, y_q_r_est_point, y_a_r_est_point = trace_to_series(self.trace)
+        quarterly_regional_ests = pd.DataFrame(
+            index=self.datetime_ts,
+            columns=pd.Index(self.region_names),
+            data=y_q_r_est_point,
+        )
+        quarterly_regional_ests_long = pd.melt(
+            quarterly_regional_ests.reset_index(), id_vars="datetime", var_name="region"
+        )
         annual_regional_ests = pd.DataFrame(
             index=self.datetime_ts,
             columns=pd.Index(self.region_names),
@@ -965,6 +972,8 @@ class Ambric:
         annual_regional_long_est = pd.melt(
             annual_regional_ests.reset_index(), id_vars="datetime", var_name="region"
         )
+        quarterly_regional_ests_long["type"] = "nowcast"
+        quarterly_regional_ests_long["measure"] = "q_on_q"
         annual_regional_long_est["type"] = "nowcast"
         annual_regional_long_est["measure"] = self.region_measure
         annual_national_ests = pd.DataFrame(
@@ -982,7 +991,13 @@ class Ambric:
         ].copy()
         xf["type"] = "outturn"
         results_df = pd.concat(
-            [xf, annual_regional_long_est, annual_national_ests_long], axis=0
+            [
+                xf,
+                annual_regional_long_est,
+                annual_national_ests_long,
+                quarterly_regional_ests_long,
+            ],
+            axis=0,
         )
         return results_df
 
@@ -1574,9 +1589,11 @@ def run_out_of_sample_exercise(
 
         # Extract estimates
         results_df_it = amb.populate_results()
+        logger.debug(results_df_it["measure"].unique())
         # | datetime | region | value | measure | type
         # We only want the nowcast from this
         results_df_it = results_df_it.loc[results_df_it["type"] == "nowcast"].copy()
+        logger.debug(results_df_it["measure"].unique())
         # Now we wish to combine it with only the relevant entries in the true data
         df_only_relevant = df.loc[
             df["datetime"].isin(results_df_it["datetime"].unique()), :
@@ -1592,6 +1609,7 @@ def run_out_of_sample_exercise(
         df_only_relevant["quarters_to_publication"] = np.nan
 
         est_and_orig_df = pd.concat([results_df_it, df_only_relevant], axis=0)
+        logger.debug(est_and_orig_df["measure"].unique())
         # Now wish to filter down to just those entries that are out-of-sample
         oos_datetimes = pd.Series(
             [
@@ -1600,8 +1618,15 @@ def run_out_of_sample_exercise(
                 if x >= datetime_spine.iloc[start_segment_oos]
             ]
         )
+        # assume these are continuous and we only need min and max.
+        # this helps keep *estimated* quarterly data, which doesn't
+        # have original datetimes in the point data.
+        oos_min_datetime = oos_datetimes.min()
+        oos_max_datetime = oos_datetimes.max()
         est_and_orig_df = est_and_orig_df.loc[
-            est_and_orig_df["datetime"].isin(oos_datetimes), :
+            (est_and_orig_df["datetime"] > oos_min_datetime)
+            & (est_and_orig_df["datetime"] <= oos_max_datetime),
+            :,
         ].copy()
         est_and_orig_df["nowcast_index"] = T_it
         logger.info(f"Time period {T_it}/{len(datetime_spine)} complete")
@@ -1609,7 +1634,10 @@ def run_out_of_sample_exercise(
         logger.info("----------------------------------------")
         counter = counter + 1
         est_and_orig_df = est_and_orig_df.loc[
-            est_and_orig_df["measure"].isin([aggregate_measure, region_measure]), :
+            est_and_orig_df["measure"].isin(
+                [aggregate_measure, region_measure, "q_on_q"]
+            ),
+            :,
         ].copy()
         df_results = pd.concat([df_results, est_and_orig_df], ignore_index=True)
     return df_results
