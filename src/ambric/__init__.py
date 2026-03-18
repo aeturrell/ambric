@@ -121,7 +121,7 @@ def to_index(series: pd.Series) -> pd.Series:
     if not isinstance(series.index, pd.DatetimeIndex):
         raise TypeError("Expected DatetimeIndex")
     series.index = series.index.to_period()
-    series = 100 * (1 + series).cumprod() / (1 + series.iloc[0])
+    series = 100 * (1 + series / 100).cumprod()
     return series
 
 
@@ -1704,8 +1704,8 @@ def trend_adjust_out_of_sample_results(
             "datetime"
         )["value"]
         series = series.sort_index()
+        series = series * 100  # convert to pct
         df_regional = extract_components(series)
-        df_regional = df_regional.pct_change(1) * 100
         df_regional["region"] = region
         df_regional["measure"] = df["measure"].iloc[0]  # This is always the same
         df_trend = pd.concat([df_trend, df_regional], axis=0)
