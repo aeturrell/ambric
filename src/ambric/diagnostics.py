@@ -1247,14 +1247,9 @@ def bands_indicator(
     region_names: list[str],
     bands: list[float] = [-0.8, -0.1, 0.1, 0.8],  # noqa: B006
 ) -> pd.DataFrame:
-    """Classify each time period into growth bands based on successive pairs.
+    """Classify growth rates into band labels for each region.
 
-    For each period from the second onwards, the pair (previous, current) is
-    examined and the *least extreme* of the two individual band
-    classifications (closer to ``"indeterminate"``) is assigned.  The first
-    period receives no classification (``NaN``).
-
-    Default bands and their labels:
+    Band thresholds (defaults):
 
     * ``< -0.8`` -- strong contraction
     * ``>= -0.8`` and ``< -0.1`` -- contraction
@@ -1280,64 +1275,15 @@ def bands_indicator(
         "growth",
         "strong growth",
     ]
-    center = len(band_names) // 2  # index of "indeterminate"
+    bins = [-float("inf")] + bands + [float("inf")]
 
     df = pd.DataFrame(data=y_nowcast, columns=pd.Index(region_names), index=datetime_ts)
     df = df.reset_index().melt(
         id_vars="datetime", var_name="region", value_name="value"
     )
+    df["classification"] = pd.cut(df["value"], bins=bins, labels=band_names)
 
-    results = []
-    for region, group in df.groupby("region"):
-        group_sorted = group.sort_values("datetime").reset_index(drop=True)
-        values = group_sorted["value"].values
-        datetimes = group_sorted["datetime"].values
-        bin_idx = np.searchsorted(bands, values, side="right")
-        n = len(values)
-
-        # First period has no predecessor, so no classification.
-        results.append(
-            {
-                "datetime": datetimes[0],
-                "region": region,
-                "classification": np.nan,
-            }
-        )
-
-        for i in range(1, n):
-            # If either value in the pair is NaN, no valid classification.
-            if np.isnan(values[i - 1]) or np.isnan(values[i]):
-                results.append(
-                    {
-                        "datetime": datetimes[i],
-                        "region": region,
-                        "classification": np.nan,
-                    }
-                )
-                continue
-
-            prev, curr = bin_idx[i - 1], bin_idx[i]
-            d_prev, d_curr = abs(prev - center), abs(curr - center)
-            # Take the least extreme (closest to indeterminate).
-            if d_prev < d_curr:
-                cls = prev
-            elif d_curr < d_prev:
-                cls = curr
-            elif prev == curr:
-                cls = prev
-            else:
-                # Equidistant on opposite sides → indeterminate.
-                cls = center
-
-            results.append(
-                {
-                    "datetime": datetimes[i],
-                    "region": region,
-                    "classification": band_names[cls],
-                }
-            )
-
-    return pd.DataFrame(results)
+    return df[["datetime", "region", "classification"]]
 
 
 def recession_indicator(
