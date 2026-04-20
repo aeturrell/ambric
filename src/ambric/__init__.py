@@ -1651,7 +1651,7 @@ def run_out_of_sample_exercise(
         # Put this in as the difference in time to the most recent
         # data point for which there's a known value
         results_df_it["quarters_to_publication"] = quarter_differences(
-            results_df_it["datetime"], datetime_spine.iloc[start_segment_oos - 1]
+            results_df_it["datetime"], datetime_spine.iloc[start_segment_oos]
         )
         # For outturns, qtrs to pub doesn't make sense
         df_only_relevant["quarters_to_publication"] = np.nan
