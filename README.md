@@ -170,6 +170,14 @@ $$\delta_\sigma \sim \text{HalfNormal}(0.15)$$
 
 $$\delta_r \sim \mathcal{N}(\delta_\mu, \delta_\sigma) \quad [R]$$
 
+##### Weights and degrees of freedom
+
+$$w \sim \mathcal{N}(1/R, 0.01) \quad [R]$$
+
+$$\nu_{\text{UK}} \sim \text{Gamma}(6, 1)$$
+
+$$\nu_{\text{A}} \sim \text{Gamma}(3, 0.5)$$
+
 ##### Growth
 
 $$\sigma_\varepsilon \sim \text{HalfNormal}(0.03) \quad [R]$$
@@ -178,7 +186,7 @@ $$\sigma_{\text{A}} \sim \text{HalfNormal}(0.2) \quad [R]$$
 
 $$\phi_r \sim \mathcal{N}(0.5, 0.15) \quad [R]$$
 
-$$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.05)$$
+$$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.01)$$
 
 #### Parameters
 
@@ -206,7 +214,7 @@ $$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.05)$$
 | $\nu_{\text{UK}}$ | $1$ |
 | $\nu_{\text{A}}$ | $1$ |
 
-Total: $6K + 2M + RK + RM + TK + TR + 5R + 5$
+Total: $5K + 2M + RK + RM + TK + TR + 5R + 5$
 
 ### Model solution
 
