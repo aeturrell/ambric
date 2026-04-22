@@ -592,6 +592,7 @@ def build_ambric_model(
     factors: npt.NDArray[np.float64],
     macro: npt.NDArray[np.float64],
     bridge_signal: npt.NDArray[np.float64],
+    region_q_on_q: npt.NDArray[np.float64] | None = None,
 ) -> pm.model.core.Model:
     """Build the AMBRIC Bayesian state-space model.
 
@@ -608,6 +609,12 @@ def build_ambric_model(
         factors: Extracted factors, shape (T, K).
         macro: Macro UK series, shape (T, M).
         bridge_signal: Quarterly bridge signal, shape (T, R).
+        region_q_on_q: Optional published quarterly regional growth rates,
+            shape ``(T, R)`` with NaN in unobserved cells. Values must be
+            decimal growth rates (e.g. ``0.005`` for 0.5%). When supplied,
+            a StudentT likelihood directly anchors ``y_reg`` at observed
+            cells; NaN cells are masked out automatically by PyMC. Defaults
+            to ``None`` (no q-on-q likelihood — backwards compatible).
 
     Returns:
         PyMC model object.
@@ -723,6 +730,18 @@ def build_ambric_model(
             "obs_annual", nu=nu_ann, mu=mu_annual, sigma=sigma_ann, observed=y_annual
         )
 
+        # --- Optional constraint: Published Regional Quarterly Growth ---
+        if region_q_on_q is not None:
+            sigma_qoq = pm.HalfNormal("sigma_qoq", sigma=0.01, shape=R)
+            nu_qoq = pm.Gamma("nu_qoq", alpha=6, beta=1)
+            pm.StudentT(
+                "obs_region_qoq",
+                nu=nu_qoq,
+                mu=y_reg,
+                sigma=sigma_qoq,
+                observed=region_q_on_q,
+            )
+
     return model
 
 
@@ -748,6 +767,7 @@ class Ambric:
         aggregate_measure: str = "gva_q_on_q",
         aggregation_region: str = "uk",
         region_measure: str = "gva_q_on_4q",
+        region_q_on_q_measure: str | None = None,
     ):
         """Initialise the ambric model.
 
@@ -763,6 +783,12 @@ class Ambric:
             aggregate_measure: UK-wide measure in q-on-q growth rate.
             aggregation_region: Highest level geography.
             region_measure: Regional measure, q-on-4q growth rate.
+            region_q_on_q_measure: Optional measure name in ``df`` supplying
+                published quarterly (q-on-q) growth rates for any subset of
+                regions/quarters. Values must be decimal growth rates (e.g.
+                ``0.005`` for 0.5%). Missing region/quarter combinations are
+                treated as NaN and masked out of the likelihood. Defaults to
+                ``None`` (no q-on-q observations — backwards compatible).
         """
         logger.info("Initialising ambric model.")
         required_columns = ["datetime", "measure", "region", "value"]
@@ -773,13 +799,16 @@ class Ambric:
         if not pd.to_datetime(df["datetime"]).dt.is_quarter_end.all():
             raise ValueError("Datetime column must only contain quarter-end dates.")
 
-        missing_measures: list[str] = [
-            x
-            for x in macro_names
+        required_measures: list[str] = (
+            macro_names
             + region_covariate_names
             + [aggregate_measure]
             + [region_measure]
-            if x not in df["measure"].unique()
+        )
+        if region_q_on_q_measure is not None:
+            required_measures = required_measures + [region_q_on_q_measure]
+        missing_measures: list[str] = [
+            x for x in required_measures if x not in df["measure"].unique()
         ]
         if missing_measures:
             raise ValueError(f"Missing measures from dataframe: {missing_measures}")
@@ -801,7 +830,7 @@ class Ambric:
                 f"Data points from before first regional data points detected; truncating start of data to {earliest_regional_datetime.strftime('%Y-%b')}"
             )
             df = df.loc[df["datetime"] >= earliest_regional_datetime, :].copy()
-        (y_uk, y_annual, Z_panel, macro, lag_qrtrs) = prep_data_for_model_run(
+        (y_uk, y_annual, Z_panel, macro, lag_qrtrs, y_qoq_r) = prep_data_for_model_run(
             df,
             macro_names=macro_names,
             region_names=region_names,
@@ -809,10 +838,13 @@ class Ambric:
             aggregate_measure=aggregate_measure,
             aggregation_region=aggregation_region,
             region_measure=region_measure,
+            region_q_on_q_measure=region_q_on_q_measure,
         )
         self.aggregate_measure = aggregate_measure
         self.aggregation_region = aggregation_region
         self.region_measure = region_measure
+        self.region_q_on_q_measure = region_q_on_q_measure
+        self.y_qoq_r: npt.NDArray[np.float64] | None = y_qoq_r
         self.macro_names: list[str] = macro_names
         self.df = df.copy()
         self.y_uk: npt.NDArray[np.float64] = y_uk
@@ -950,6 +982,7 @@ class Ambric:
             self.factors,
             self.macro,
             self.bridge_signal,
+            region_q_on_q=self.y_qoq_r,
         )
 
         # Step 5: Variational inference

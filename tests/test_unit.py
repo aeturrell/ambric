@@ -291,7 +291,7 @@ class TestPrepDataForModelRun:
         )
         df = pd.concat([df, extra_rows], ignore_index=True)
 
-        y_uk, y_a_r, Z_panel, macro, lag_qtrs = prep_data_for_model_run(
+        y_uk, y_a_r, Z_panel, macro, lag_qtrs, y_qoq_r = prep_data_for_model_run(
             df,
             macro_names=macro_names,
             region_names=region_names,
