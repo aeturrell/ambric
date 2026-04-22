@@ -152,11 +152,22 @@ def prep_data_for_model_run(
         region_measure (str, optional): Regional measure, q-on-4q growth rate. Defaults to "gva_q_on_4q".
         region_q_on_q_measure (str | None, optional): Optional measure name in ``df`` supplying
             published quarterly (q-on-q) growth rates for any subset of regions and quarters.
-            Values must be decimal growth rates (e.g. ``0.005`` for 0.5%), matching the
-            convention used for ``aggregate_measure`` / ``region_measure``. Rows are expected
-            only where a published value exists; all missing region/quarter pairs are treated
-            as NaN and automatically masked out of the likelihood downstream. Defaults to
-            ``None`` (no q-on-q observations supplied — backwards compatible).
+            Rows live in the same long dataframe as every other input, with the standard
+            columns ``datetime | measure | region | value``:
+
+                * ``datetime``: quarter-end timestamp.
+                * ``measure``: equal to the string passed here.
+                * ``region``: one of the names in ``region_names``.
+                * ``value``: decimal q-on-q growth rate (e.g. ``0.005`` for 0.5% —
+                  **not** a percentage), matching the convention used for
+                  ``aggregate_measure`` / ``region_measure``.
+
+            Partial coverage is fully supported: rows may be supplied for only a
+            subset of regions and a subset of quarters. After pivoting, absent
+            region/quarter pairs become NaN and are automatically masked out of
+            the downstream likelihood, so uncovered regions and quarters
+            contribute nothing. Defaults to ``None`` (no q-on-q observations —
+            backwards compatible).
 
     Returns:
         tuple: ``(y_uk_extracted, y_a_r_extracted, Z_panel_extract, macro_extracted, lag_qtrs, y_qoq_r_extracted)``.
@@ -167,10 +178,7 @@ def prep_data_for_model_run(
     # Data checks
     available_measures = set(df["measure"].unique())
     required_measures = (
-        macro_names
-        + region_covariate_names
-        + [aggregate_measure]
-        + [region_measure]
+        macro_names + region_covariate_names + [aggregate_measure] + [region_measure]
     )
     if region_q_on_q_measure is not None:
         required_measures = required_measures + [region_q_on_q_measure]

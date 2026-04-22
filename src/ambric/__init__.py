@@ -646,7 +646,7 @@ def build_ambric_model(
         bridge_data = pm.Data("bridge_signal", bridge_signal)
 
         # --- Noise parameters ---
-        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.03, shape=R)
+        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.1, shape=R)
         sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.01)
         sigma_ann = pm.HalfNormal("sigma_ann", sigma=0.2, shape=R)
 
@@ -732,8 +732,10 @@ def build_ambric_model(
 
         # --- Optional constraint: Published Regional Quarterly Growth ---
         if region_q_on_q is not None:
-            sigma_qoq = pm.HalfNormal("sigma_qoq", sigma=0.01, shape=R)
-            nu_qoq = pm.Gamma("nu_qoq", alpha=6, beta=1)
+            sigma_qoq = pm.HalfNormal("sigma_qoq", sigma=0.002, shape=R)
+            nu_qoq = pm.Normal(
+                "obs_region_qoq", mu=y_reg, sigma=sigma_qoq, observed=region_q_on_q
+            )
             pm.StudentT(
                 "obs_region_qoq",
                 nu=nu_qoq,
@@ -785,10 +787,25 @@ class Ambric:
             region_measure: Regional measure, q-on-4q growth rate.
             region_q_on_q_measure: Optional measure name in ``df`` supplying
                 published quarterly (q-on-q) growth rates for any subset of
-                regions/quarters. Values must be decimal growth rates (e.g.
-                ``0.005`` for 0.5%). Missing region/quarter combinations are
-                treated as NaN and masked out of the likelihood. Defaults to
-                ``None`` (no q-on-q observations — backwards compatible).
+                regions/quarters. Rows live in the same long dataframe as
+                every other input, with the standard columns
+                ``datetime | measure | region | value``:
+
+                    * ``datetime``: quarter-end timestamp (as with all other
+                      measures).
+                    * ``measure``: equal to the string passed here (e.g.
+                      ``"region_q_on_q"``).
+                    * ``region``: one of the names in ``region_names``.
+                    * ``value``: decimal q-on-q growth rate (e.g. ``0.005``
+                      for 0.5% — **not** a percentage).
+
+                Partial coverage is fully supported: you may supply rows for
+                only one or two regions, and only for some quarters. Missing
+                region/quarter combinations (no row, or NaN value) are
+                automatically masked out of the likelihood — uncovered
+                regions and quarters contribute nothing to this term, and
+                the model fits normally. Defaults to ``None`` (no q-on-q
+                observations — backwards compatible).
         """
         logger.info("Initialising ambric model.")
         required_columns = ["datetime", "measure", "region", "value"]
