@@ -733,12 +733,8 @@ def build_ambric_model(
         # --- Optional constraint: Published Regional Quarterly Growth ---
         if region_q_on_q is not None:
             sigma_qoq = pm.HalfNormal("sigma_qoq", sigma=0.002, shape=R)
-            nu_qoq = pm.Normal(
-                "obs_region_qoq", mu=y_reg, sigma=sigma_qoq, observed=region_q_on_q
-            )
-            pm.StudentT(
+            pm.Normal(
                 "obs_region_qoq",
-                nu=nu_qoq,
                 mu=y_reg,
                 sigma=sigma_qoq,
                 observed=region_q_on_q,
