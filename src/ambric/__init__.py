@@ -754,7 +754,6 @@ def build_ambric_model(
             "obs_annual", nu=nu_ann, mu=mu_annual, sigma=sigma_ann, observed=y_annual
         )
 
-
     return model
 
 
@@ -1606,6 +1605,7 @@ def run_out_of_sample_exercise(
     aggregate_measure: str = "gva_q_on_q",
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
+    region_q_on_q_measure: str | None = None,
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
@@ -1627,6 +1627,15 @@ def run_out_of_sample_exercise(
         aggregate_measure (str): Nation-wide measure. Defaults to "gva_q_on_q".
         aggregation_region (str): Top level geography. Defaults to "uk".
         region_measure (str): Growth measure regional. Defaults to "gva_q_on_4q".
+        region_q_on_q_measure (str | None): Optional measure name in ``df`` supplying
+            published quarterly (q-on-q) regional growth rates as a hard clamp on
+            ``y_reg``. Same format as every other measure (``datetime | measure |
+            region | value``); values must be decimal growth rates. Inside the
+            out-of-sample window this exercise NaN-masks these rows for every step
+            (as with ``region_measure``), so published quarterly values inside the
+            OOS window do not leak into the nowcast. Older published values
+            remain as clamps. Defaults to ``None`` (no q-on-q clamp, backwards
+            compatible).
         step_size (int): Quarters to advance per OOS step. Defaults to 1.
         init_chunk_size (int): Initial learning window size. Defaults to 20.
         lag_qtrs (int): How many quarters before regional data are published. Defaults to 6.
@@ -1672,6 +1681,15 @@ def run_out_of_sample_exercise(
         # Block the annual regional data that has yet to be observed
         df_it_masked = df_it.copy()
         df_it_masked.loc[oos_mask, "value"] = np.nan
+        # Also block any published quarterly regional data inside the OOS
+        # window so the hard clamp cannot leak truth into the nowcast.
+        if region_q_on_q_measure is not None:
+            qoq_oos_mask = (
+                (df_it["region"].isin(region_names))
+                & (df_it["measure"] == region_q_on_q_measure)
+                & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos])
+            )
+            df_it_masked.loc[qoq_oos_mask, "value"] = np.nan
         amb = Ambric(
             df_it_masked,
             macro_names=macro_names,
@@ -1681,6 +1699,7 @@ def run_out_of_sample_exercise(
             aggregate_measure=aggregate_measure,
             aggregation_region=aggregation_region,
             region_measure=region_measure,
+            region_q_on_q_measure=region_q_on_q_measure,
         )
 
         logger.info("Ambric model created with ID: " + amb.model_id)
