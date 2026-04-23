@@ -1609,6 +1609,7 @@ def run_out_of_sample_exercise(
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
+    lag_qtrs_qoq: int = 1,
     n_its: int = 100000,
     n_posterior_samples: int = 3000,
 ) -> pd.DataFrame:
@@ -1638,7 +1639,14 @@ def run_out_of_sample_exercise(
             compatible).
         step_size (int): Quarters to advance per OOS step. Defaults to 1.
         init_chunk_size (int): Initial learning window size. Defaults to 20.
-        lag_qtrs (int): How many quarters before regional data are published. Defaults to 6.
+        lag_qtrs (int): How many quarters before annual regional data are
+            published; drives the OOS mask for ``region_measure``. Tuned for the
+            ONS regional annual GVA release (~6 quarters). Defaults to 6.
+        lag_qtrs_qoq (int): How many quarters before quarterly regional data are
+            published; drives a separate OOS mask for ``region_q_on_q_measure``.
+            Scot Gov quarterly GDP publishes with ~1 quarter lag, so a smaller
+            value than ``lag_qtrs`` is realistic. Only used when
+            ``region_q_on_q_measure`` is not ``None``. Defaults to 1.
         n_its (int): Iterations of ADVI for Bayesian inference. Defaults to 100000.
         n_posterior_samples (int): Samples of the posterior. Defaults to 3000.
 
@@ -1684,10 +1692,14 @@ def run_out_of_sample_exercise(
         # Also block any published quarterly regional data inside the OOS
         # window so the hard clamp cannot leak truth into the nowcast.
         if region_q_on_q_measure is not None:
+            start_segment_oos_qoq = T_it - lag_qtrs_qoq
+            logger.info(
+                f"    Out-of-sample period (q-on-q clamp): {datetime_spine.iloc[start_segment_oos_qoq].strftime('%Y-%b')} to {datetime_spine.iloc[T_it].strftime('%Y-%b')}"
+            )
             qoq_oos_mask = (
                 (df_it["region"].isin(region_names))
                 & (df_it["measure"] == region_q_on_q_measure)
-                & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos])
+                & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos_qoq])
             )
             df_it_masked.loc[qoq_oos_mask, "value"] = np.nan
         amb = Ambric(
