@@ -612,9 +612,15 @@ def build_ambric_model(
         region_q_on_q: Optional published quarterly regional growth rates,
             shape ``(T, R)`` with NaN in unobserved cells. Values must be
             decimal growth rates (e.g. ``0.005`` for 0.5%). When supplied,
-            a StudentT likelihood directly anchors ``y_reg`` at observed
-            cells; NaN cells are masked out automatically by PyMC. Defaults
-            to ``None`` (no q-on-q likelihood — backwards compatible).
+            ``y_reg`` is built as a hybrid ``pm.Deterministic``: at every
+            ``(t, r)`` with an observed value, ``y_reg[t, r]`` is
+            hard-clamped to that value; at NaN cells, ``y_reg[t, r]``
+            equals the sampled latent ``y_reg_free[t, r]``. The clamped
+            values then propagate through the UK aggregation, annual
+            aggregation, and AR(1) dynamics, informing unobserved
+            neighbours rather than competing with them through a
+            likelihood term. Defaults to ``None`` (no clamp — backwards
+            compatible).
 
     Returns:
         PyMC model object.
@@ -685,7 +691,25 @@ def build_ambric_model(
 
         # --- Regional AR(1) dynamics ---
         phi_r = pm.Normal("phi_r", mu=0.5, sigma=0.15, shape=R)
-        y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
+        if region_q_on_q is not None:
+            clamp_mask_np = (~np.isnan(region_q_on_q)).astype(np.float64)
+            clamp_vals_np = np.where(
+                clamp_mask_np.astype(bool), region_q_on_q, 0.0
+            ).astype(np.float64)
+            clamp_mask = pm.Data("region_qoq_mask", clamp_mask_np)
+            clamp_vals = pm.Data("region_qoq_values", clamp_vals_np)
+            y_reg_free = pm.Normal("y_reg_free", mu=0, sigma=1, shape=(T, R))
+            y_reg = pm.Deterministic(
+                "y_reg",
+                clamp_mask * clamp_vals  # ty: ignore[unsupported-operator]
+                + (1 - clamp_mask) * y_reg_free,  # ty: ignore[unsupported-operator]
+            )
+            logger.info(
+                f"Hard-clamping y_reg at {int(clamp_mask_np.sum())} observed "
+                f"region-quarter cells from region_q_on_q."
+            )
+        else:
+            y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
 
         pm.Potential(
             "regional_ar_prior",
@@ -730,15 +754,6 @@ def build_ambric_model(
             "obs_annual", nu=nu_ann, mu=mu_annual, sigma=sigma_ann, observed=y_annual
         )
 
-        # --- Optional constraint: Published Regional Quarterly Growth ---
-        if region_q_on_q is not None:
-            sigma_qoq = pm.HalfNormal("sigma_qoq", sigma=0.002, shape=R)
-            pm.Normal(
-                "obs_region_qoq",
-                mu=y_reg,
-                sigma=sigma_qoq,
-                observed=region_q_on_q,
-            )
 
     return model
 
