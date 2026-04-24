@@ -2,6 +2,8 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+from loguru import logger
+
 from ambric import (
     Ambric,
     run_out_of_sample_exercise,
@@ -13,7 +15,6 @@ from ambric.diagnostics import (
     plot_out_of_sample_rmse,
 )
 from ambric.utilities import generate_realistic_simulated_data
-from loguru import logger
 
 
 @patch("matplotlib.pyplot.show")
@@ -153,9 +154,9 @@ def test_vanilla_run_one_region_no_lag(mock_show) -> None:
     )
 
     # The modal lag should be the original lag_qtrs, not 0
-    assert (
-        amb.lag_qtrs == lag_qtrs
-    ), f"Expected modal lag_qtrs={lag_qtrs}, got {amb.lag_qtrs}"
+    assert amb.lag_qtrs == lag_qtrs, (
+        f"Expected modal lag_qtrs={lag_qtrs}, got {amb.lag_qtrs}"
+    )
 
     logger.info("Ambric model created with ID: " + amb.model_id)
 

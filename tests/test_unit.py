@@ -8,6 +8,7 @@ validation paths are exercised.
 import numpy as np
 import pandas as pd
 import pytest
+
 from ambric import (
     Ambric,
     _aggregate_quarterly_to_annual,
