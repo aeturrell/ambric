@@ -592,6 +592,7 @@ def build_ambric_model(
     factors: npt.NDArray[np.float64],
     macro: npt.NDArray[np.float64],
     bridge_signal: npt.NDArray[np.float64],
+    region_q_on_q: npt.NDArray[np.float64] | None = None,
 ) -> pm.model.core.Model:
     """Build the AMBRIC Bayesian state-space model.
 
@@ -608,6 +609,18 @@ def build_ambric_model(
         factors: Extracted factors, shape (T, K).
         macro: Macro UK series, shape (T, M).
         bridge_signal: Quarterly bridge signal, shape (T, R).
+        region_q_on_q: Optional published quarterly regional growth rates,
+            shape ``(T, R)`` with NaN in unobserved cells. Values must be
+            decimal growth rates (e.g. ``0.005`` for 0.5%). When supplied,
+            ``y_reg`` is built as a hybrid ``pm.Deterministic``: at every
+            ``(t, r)`` with an observed value, ``y_reg[t, r]`` is
+            hard-clamped to that value; at NaN cells, ``y_reg[t, r]``
+            equals the sampled latent ``y_reg_free[t, r]``. The clamped
+            values then propagate through the UK aggregation, annual
+            aggregation, and AR(1) dynamics, informing unobserved
+            neighbours rather than competing with them through a
+            likelihood term. Defaults to ``None`` (no clamp — backwards
+            compatible).
 
     Returns:
         PyMC model object.
@@ -639,7 +652,7 @@ def build_ambric_model(
         bridge_data = pm.Data("bridge_signal", bridge_signal)
 
         # --- Noise parameters ---
-        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.03, shape=R)
+        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.1, shape=R)
         sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.01)
         sigma_ann = pm.HalfNormal("sigma_ann", sigma=0.2, shape=R)
 
@@ -678,7 +691,25 @@ def build_ambric_model(
 
         # --- Regional AR(1) dynamics ---
         phi_r = pm.Normal("phi_r", mu=0.5, sigma=0.15, shape=R)
-        y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
+        if region_q_on_q is not None:
+            clamp_mask_np = (~np.isnan(region_q_on_q)).astype(np.float64)
+            clamp_vals_np = np.where(
+                clamp_mask_np.astype(bool), region_q_on_q, 0.0
+            ).astype(np.float64)
+            clamp_mask = pm.Data("region_qoq_mask", clamp_mask_np)
+            clamp_vals = pm.Data("region_qoq_values", clamp_vals_np)
+            y_reg_free = pm.Normal("y_reg_free", mu=0, sigma=1, shape=(T, R))
+            y_reg = pm.Deterministic(
+                "y_reg",
+                clamp_mask * clamp_vals  # ty: ignore[unsupported-operator]
+                + (1 - clamp_mask) * y_reg_free,  # ty: ignore[unsupported-operator]
+            )
+            logger.info(
+                f"Hard-clamping y_reg at {int(clamp_mask_np.sum())} observed "
+                f"region-quarter cells from region_q_on_q."
+            )
+        else:
+            y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
 
         pm.Potential(
             "regional_ar_prior",
@@ -748,6 +779,7 @@ class Ambric:
         aggregate_measure: str = "gva_q_on_q",
         aggregation_region: str = "uk",
         region_measure: str = "gva_q_on_4q",
+        region_q_on_q_measure: str | None = None,
     ):
         """Initialise the ambric model.
 
@@ -763,6 +795,27 @@ class Ambric:
             aggregate_measure: UK-wide measure in q-on-q growth rate.
             aggregation_region: Highest level geography.
             region_measure: Regional measure, q-on-4q growth rate.
+            region_q_on_q_measure: Optional measure name in ``df`` supplying
+                published quarterly (q-on-q) growth rates for any subset of
+                regions/quarters. Rows live in the same long dataframe as
+                every other input, with the standard columns
+                ``datetime | measure | region | value``:
+
+                    * ``datetime``: quarter-end timestamp (as with all other
+                      measures).
+                    * ``measure``: equal to the string passed here (e.g.
+                      ``"region_q_on_q"``).
+                    * ``region``: one of the names in ``region_names``.
+                    * ``value``: decimal q-on-q growth rate (e.g. ``0.005``
+                      for 0.5% — **not** a percentage).
+
+                Partial coverage is fully supported: you may supply rows for
+                only one or two regions, and only for some quarters. Missing
+                region/quarter combinations (no row, or NaN value) are
+                automatically masked out of the likelihood — uncovered
+                regions and quarters contribute nothing to this term, and
+                the model fits normally. Defaults to ``None`` (no q-on-q
+                observations — backwards compatible).
         """
         logger.info("Initialising ambric model.")
         required_columns = ["datetime", "measure", "region", "value"]
@@ -773,13 +826,16 @@ class Ambric:
         if not pd.to_datetime(df["datetime"]).dt.is_quarter_end.all():
             raise ValueError("Datetime column must only contain quarter-end dates.")
 
-        missing_measures: list[str] = [
-            x
-            for x in macro_names
+        required_measures: list[str] = (
+            macro_names
             + region_covariate_names
             + [aggregate_measure]
             + [region_measure]
-            if x not in df["measure"].unique()
+        )
+        if region_q_on_q_measure is not None:
+            required_measures = required_measures + [region_q_on_q_measure]
+        missing_measures: list[str] = [
+            x for x in required_measures if x not in df["measure"].unique()
         ]
         if missing_measures:
             raise ValueError(f"Missing measures from dataframe: {missing_measures}")
@@ -801,7 +857,7 @@ class Ambric:
                 f"Data points from before first regional data points detected; truncating start of data to {earliest_regional_datetime.strftime('%Y-%b')}"
             )
             df = df.loc[df["datetime"] >= earliest_regional_datetime, :].copy()
-        (y_uk, y_annual, Z_panel, macro, lag_qrtrs) = prep_data_for_model_run(
+        (y_uk, y_annual, Z_panel, macro, lag_qrtrs, y_qoq_r) = prep_data_for_model_run(
             df,
             macro_names=macro_names,
             region_names=region_names,
@@ -809,10 +865,13 @@ class Ambric:
             aggregate_measure=aggregate_measure,
             aggregation_region=aggregation_region,
             region_measure=region_measure,
+            region_q_on_q_measure=region_q_on_q_measure,
         )
         self.aggregate_measure = aggregate_measure
         self.aggregation_region = aggregation_region
         self.region_measure = region_measure
+        self.region_q_on_q_measure = region_q_on_q_measure
+        self.y_qoq_r: npt.NDArray[np.float64] | None = y_qoq_r
         self.macro_names: list[str] = macro_names
         self.df = df.copy()
         self.y_uk: npt.NDArray[np.float64] = y_uk
@@ -950,6 +1009,7 @@ class Ambric:
             self.factors,
             self.macro,
             self.bridge_signal,
+            region_q_on_q=self.y_qoq_r,
         )
 
         # Step 5: Variational inference
@@ -1545,9 +1605,11 @@ def run_out_of_sample_exercise(
     aggregate_measure: str = "gva_q_on_q",
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
+    region_q_on_q_measure: str | None = None,
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
+    lag_qtrs_qoq: int = 1,
     n_its: int = 100000,
     n_posterior_samples: int = 3000,
 ) -> pd.DataFrame:
@@ -1566,9 +1628,25 @@ def run_out_of_sample_exercise(
         aggregate_measure (str): Nation-wide measure. Defaults to "gva_q_on_q".
         aggregation_region (str): Top level geography. Defaults to "uk".
         region_measure (str): Growth measure regional. Defaults to "gva_q_on_4q".
+        region_q_on_q_measure (str | None): Optional measure name in ``df`` supplying
+            published quarterly (q-on-q) regional growth rates as a hard clamp on
+            ``y_reg``. Same format as every other measure (``datetime | measure |
+            region | value``); values must be decimal growth rates. Inside the
+            out-of-sample window this exercise NaN-masks these rows for every step
+            (as with ``region_measure``), so published quarterly values inside the
+            OOS window do not leak into the nowcast. Older published values
+            remain as clamps. Defaults to ``None`` (no q-on-q clamp, backwards
+            compatible).
         step_size (int): Quarters to advance per OOS step. Defaults to 1.
         init_chunk_size (int): Initial learning window size. Defaults to 20.
-        lag_qtrs (int): How many quarters before regional data are published. Defaults to 6.
+        lag_qtrs (int): How many quarters before annual regional data are
+            published; drives the OOS mask for ``region_measure``. Tuned for the
+            ONS regional annual GVA release (~6 quarters). Defaults to 6.
+        lag_qtrs_qoq (int): How many quarters before quarterly regional data are
+            published; drives a separate OOS mask for ``region_q_on_q_measure``.
+            Scot Gov quarterly GDP publishes with ~1 quarter lag, so a smaller
+            value than ``lag_qtrs`` is realistic. Only used when
+            ``region_q_on_q_measure`` is not ``None``. Defaults to 1.
         n_its (int): Iterations of ADVI for Bayesian inference. Defaults to 100000.
         n_posterior_samples (int): Samples of the posterior. Defaults to 3000.
 
@@ -1611,6 +1689,19 @@ def run_out_of_sample_exercise(
         # Block the annual regional data that has yet to be observed
         df_it_masked = df_it.copy()
         df_it_masked.loc[oos_mask, "value"] = np.nan
+        # Also block any published quarterly regional data inside the OOS
+        # window so the hard clamp cannot leak truth into the nowcast.
+        if region_q_on_q_measure is not None:
+            start_segment_oos_qoq = T_it - lag_qtrs_qoq
+            logger.info(
+                f"    Out-of-sample period (q-on-q clamp): {datetime_spine.iloc[start_segment_oos_qoq].strftime('%Y-%b')} to {datetime_spine.iloc[T_it].strftime('%Y-%b')}"
+            )
+            qoq_oos_mask = (
+                (df_it["region"].isin(region_names))
+                & (df_it["measure"] == region_q_on_q_measure)
+                & (df_it["datetime"] >= datetime_spine.iloc[start_segment_oos_qoq])
+            )
+            df_it_masked.loc[qoq_oos_mask, "value"] = np.nan
         amb = Ambric(
             df_it_masked,
             macro_names=macro_names,
@@ -1620,6 +1711,7 @@ def run_out_of_sample_exercise(
             aggregate_measure=aggregate_measure,
             aggregation_region=aggregation_region,
             region_measure=region_measure,
+            region_q_on_q_measure=region_q_on_q_measure,
         )
 
         logger.info("Ambric model created with ID: " + amb.model_id)

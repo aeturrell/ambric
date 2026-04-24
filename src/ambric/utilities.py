@@ -129,12 +129,14 @@ def prep_data_for_model_run(
     aggregate_measure: str = "gva_q_on_q",
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
+    region_q_on_q_measure: str | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     list[npt.NDArray[np.float64]],
     npt.NDArray[np.float64],
     int,
+    npt.NDArray[np.float64] | None,
 ]:
     """Expects a data frame in following format:
     datetime | measure | region | value
@@ -148,22 +150,39 @@ def prep_data_for_model_run(
         aggregate_measure (str, optional): UK-wide measure in q-on-q growth rate. Defaults to "gva_q_on_q".
         aggregation_region (str, optional): Highest level geography, which other regions sum to. Defaults to "uk".
         region_measure (str, optional): Regional measure, q-on-4q growth rate. Defaults to "gva_q_on_4q".
+        region_q_on_q_measure (str | None, optional): Optional measure name in ``df`` supplying
+            published quarterly (q-on-q) growth rates for any subset of regions and quarters.
+            Rows live in the same long dataframe as every other input, with the standard
+            columns ``datetime | measure | region | value``:
+
+                * ``datetime``: quarter-end timestamp.
+                * ``measure``: equal to the string passed here.
+                * ``region``: one of the names in ``region_names``.
+                * ``value``: decimal q-on-q growth rate (e.g. ``0.005`` for 0.5% —
+                  **not** a percentage), matching the convention used for
+                  ``aggregate_measure`` / ``region_measure``.
+
+            Partial coverage is fully supported: rows may be supplied for only a
+            subset of regions and a subset of quarters. After pivoting, absent
+            region/quarter pairs become NaN and are automatically masked out of
+            the downstream likelihood, so uncovered regions and quarters
+            contribute nothing. Defaults to ``None`` (no q-on-q observations —
+            backwards compatible).
 
     Returns:
-        (npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]): y_uk_extracted, y_a_r_extracted, Z_panel_extract, macro_extracted
-        lag_qtrs (int): Number of quarters lag in annual regional data compared to quarterly UK data
+        tuple: ``(y_uk_extracted, y_a_r_extracted, Z_panel_extract, macro_extracted, lag_qtrs, y_qoq_r_extracted)``.
+        ``y_qoq_r_extracted`` is a ``(T, R)`` array aligned to ``region_names`` with NaN in
+        unobserved cells, or ``None`` when ``region_q_on_q_measure`` is ``None``.
     """
     logger.info("Prepping data for model run.")
     # Data checks
     available_measures = set(df["measure"].unique())
-    missing_measures = [
-        x
-        for x in macro_names
-        + region_covariate_names
-        + [aggregate_measure]
-        + [region_measure]
-        if x not in available_measures
-    ]
+    required_measures = (
+        macro_names + region_covariate_names + [aggregate_measure] + [region_measure]
+    )
+    if region_q_on_q_measure is not None:
+        required_measures = required_measures + [region_q_on_q_measure]
+    missing_measures = [x for x in required_measures if x not in available_measures]
     if missing_measures:
         raise KeyError(f"Measures not found in the data: {missing_measures}")
 
@@ -228,6 +247,27 @@ def prep_data_for_model_run(
     )
 
     all_datetimes = sorted(df["datetime"].unique())
+
+    y_qoq_r_extracted: npt.NDArray[np.float64] | None
+    if region_q_on_q_measure is not None:
+        y_qoq_r_extracted = (
+            df.loc[
+                (df["measure"] == region_q_on_q_measure)
+                & (df["region"].isin(region_names)),
+                :,
+            ]
+            .pivot(index="datetime", columns="region", values="value")
+            .reindex(index=all_datetimes, columns=region_names)
+            .values
+        )
+        n_obs = int(np.sum(~np.isnan(y_qoq_r_extracted)))
+        logger.info(
+            f"Regional q-on-q measure '{region_q_on_q_measure}': "
+            f"{n_obs} observed cells across shape {y_qoq_r_extracted.shape}"
+        )
+    else:
+        y_qoq_r_extracted = None
+
     Z_panel_extract: list[npt.NDArray[np.float64]] = [
         df.loc[
             ((df["region"].isin(region_names)) & (df["measure"] == curr_measure)),
@@ -249,6 +289,7 @@ def prep_data_for_model_run(
         Z_panel_extract,
         macro_extracted,
         lag_qtrs,
+        y_qoq_r_extracted,
     )
 
 
