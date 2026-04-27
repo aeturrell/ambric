@@ -1380,7 +1380,7 @@ def live_recession_indicator(
     return df
 
 
-def out_of_sample_classification_performance_table(
+def oos_q_on_4q_performance_table(
     df_results: pd.DataFrame, region_measure: str, path: Path | None = None
 ) -> pd.DataFrame:
     """Compute up/down classification accuracy by region and horizon.

@@ -10,7 +10,7 @@ from ambric import (
     trend_adjust_out_of_sample_results,
 )
 from ambric.diagnostics import (
-    out_of_sample_classification_performance_table,
+    oos_q_on_4q_performance_table,
     plot_out_of_sample_nowcasts,
     plot_out_of_sample_rmse,
 )
@@ -279,7 +279,7 @@ def test_pseudo_realtime_directly(mock_show) -> None:
 
     plot_out_of_sample_rmse(df_results, region_measure=region_measure)
     plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
-    out_of_sample_classification_performance_table(df_results, region_measure)
+    oos_q_on_4q_performance_table(df_results, region_measure)
     # Below requires small step size
     trend_adjust_out_of_sample_results(df_results, quarters_to_pub=lag_qtrs)
     mock_show.assert_called()
@@ -335,5 +335,5 @@ def test_pseudo_realtime_with_early_nan_covariates(mock_show) -> None:
 
     plot_out_of_sample_rmse(df_results, region_measure=region_measure)
     plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
-    out_of_sample_classification_performance_table(df_results, region_measure)
+    oos_q_on_4q_performance_table(df_results, region_measure)
     mock_show.assert_called()
