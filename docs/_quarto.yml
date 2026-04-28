@@ -50,7 +50,7 @@ quartodoc:
       contents:
         - diagnostics.plot_out_of_sample_nowcasts
         - diagnostics.plot_out_of_sample_rmse
-        - diagnostics.out_of_sample_classification_performance_table
+        - diagnostics.oos_q_on_4q_performance_table
     - title: "Utilities"
       desc: "Data preparation and simulation"
       contents:

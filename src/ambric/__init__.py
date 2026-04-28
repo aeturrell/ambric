@@ -1804,3 +1804,75 @@ def trend_adjust_out_of_sample_results(
     if path:
         df_trend.to_parquet(path / "trend_q_on_q.parquet")
     return df_trend
+
+
+def bands_indicator_out_of_sample_results(
+    df_results: pd.DataFrame,
+    path: Path | None = None,
+    bands: list[float] = [-0.8, -0.1, 0.1, 0.8],  # noqa: B006
+) -> pd.DataFrame:
+    """Bands classification of out-of-sample trend q-on-q nowcasts.
+
+    For every ``(region, datetime, quarters_to_publication, nowcast_index)``
+    in the OOS results, extracts the X13 trend of the q-on-q nowcast (per
+    ``quarters_to_publication`` slice), converts it back to q-on-q growth in
+    percentage points, and classifies into bands using
+    :func:`~ambric.diagnostics.bands_indicator`.
+
+    Args:
+        df_results (pd.DataFrame): Output of :func:`run_out_of_sample_exercise`.
+        path (Path | None): Directory to save the table as Parquet. When
+            ``None`` no file is written.
+        bands (list[float]): Interior bin edges in percentage points.
+            Defaults to ``[-0.8, -0.1, 0.1, 0.8]``.
+
+    Returns:
+        pd.DataFrame: Long-format frame with columns ``region``, ``datetime``,
+            ``quarters_to_publication``, ``nowcast_index``, ``classification``.
+    """
+    df = df_results.loc[
+        (df_results["type"] == "nowcast") & (df_results["measure"] == "q_on_q")
+    ].copy()
+    out_frames: list[pd.DataFrame] = []
+    for qtp in sorted(df["quarters_to_publication"].dropna().unique()):
+        df_qtp = df.loc[df["quarters_to_publication"] == qtp]
+        idx_map = (
+            df_qtp.drop_duplicates("datetime")
+            .set_index("datetime")["nowcast_index"]
+            .sort_index()
+        )
+        region_names = list(df_qtp["region"].unique())
+        trend_qoq_by_region: dict[str, pd.Series] = {}
+        for region in region_names:
+            series = df_qtp.loc[
+                df_qtp["region"] == region, ["datetime", "value"]
+            ].set_index("datetime")["value"]
+            series = series.sort_index() * 100
+            df_regional = extract_components(series)
+            trend_qoq_by_region[region] = 100 * df_regional["trend"].pct_change()
+        wide = pd.DataFrame(trend_qoq_by_region)[region_names]
+        wide = wide.iloc[1:]
+        datetime_ts = pd.Series(wide.index.to_timestamp(), name="datetime")
+        long = bands_indicator(
+            np.array(wide.values),
+            region_names=region_names,
+            datetime_ts=datetime_ts,
+            bands=bands,
+        )
+        long["quarters_to_publication"] = qtp
+        long["nowcast_index"] = long["datetime"].map(idx_map)
+        out_frames.append(long)
+    out = pd.concat(out_frames, ignore_index=True)[
+        [
+            "region",
+            "datetime",
+            "quarters_to_publication",
+            "nowcast_index",
+            "classification",
+        ]
+    ]
+    if path:
+        out_to_write = out.copy()
+        out_to_write["classification"] = out_to_write["classification"].astype(str)
+        out_to_write.to_parquet(path / "oos_results_bands_indicator.parquet")
+    return out
