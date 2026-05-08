@@ -1,0 +1,138 @@
+---
+title: How to use AMBRIC
+jupyter: python3
+---
+
+
+
+```{python}
+#| echo: false
+import matplotlib_inline.backend_inline
+
+matplotlib_inline.backend_inline.set_matplotlib_formats("svg")
+```
+
+Let's import the package.
+
+```{python}
+from ambric import Ambric
+from ambric.utilities import generate_realistic_simulated_data
+```
+
+As a user, we have to bring a few things to the party. The first, of course, is data, which we will simulate.
+
+Let's set-up some simulated data. We'll specify how many underlying factors are driving regional dynamics first.
+
+```{python}
+n_factors = 2
+df = generate_realistic_simulated_data(n_factors=n_factors, R=12)
+```
+
+Data that are input into the model must have this structure:
+
+```{python}
+df.sample(10)
+```
+
+The user must also specify the details of what the model will use. In particular, which regional variables, macroeconomic indicators (these should always have the aggregate region/top level geography as their region), and regional covariates to use. We'll just use all of these:
+
+```{python}
+aggregation_region = "uk"
+region_names = [x for x in df["region"].unique() if x != aggregation_region]
+macro_names = [x for x in df["measure"].unique() if "macro" in x]
+region_covariate_names = [x for x in df["measure"].unique() if "regional_covar" in x]
+```
+
+Gotcha: you must ensure that the annual regional data have datetime index entries for **all** quarters up to the last published annual macro value. For non-year end quarters, the values should be nan.
+
+In a typical use case, you will have non-nan quarters of quarterly growth at the aggregate region (eg the UK) for which the regional data are nan. Those nans in the time period between is what we are nowcasting.
+
+Okay, we're ready to build a **AMBRIC** model!
+
+```{python}
+amb = Ambric(
+    df,
+    macro_names,
+    region_names,
+    region_covariate_names,
+    n_factors=n_factors,
+)
+amb
+```
+
+Note that the model has specified all of its details, including that it sees that there are 6 rows of the regional data missing that will be estimated by the model. The model also tells us it isn't fitted, so let's sort that. We recommended using at least 100k iterations.
+
+```{python}
+n_iterations = 200000
+n_posterior_samples = 3000
+amb.fit(n_iterations, n_posterior_samples)
+```
+
+That's it! It's done. Now let's look at some results.
+
+First, our regional estimates of quarterly growth must be consistent with the observed national growth. We can check the implied vs the true growth at the national level.
+
+```{python}
+amb.plot_national_quarterly_vs_implied()
+```
+
+Next let's look at what the regional growth (q on 4 q earlier) looks like for all regions.
+
+```{python}
+amb.plot_regional_annual_estimate()
+```
+
+We can also look at the underlying quarterly regional growth estimates (the latent $y_{t,r}$):
+
+```{python}
+amb.plot_estimated_regional_quarterly()
+```
+
+And, if we want tables of the nowcasts, there's a built-in for that at either q-on-4q
+
+```{python}
+amb.point_estimates_q_on_4q().iloc[-3:, :]
+```
+
+or q-on-q:
+
+```{python}
+amb.point_estimates_q_on_q().iloc[-3:, :]
+```
+
+These can be turned into a regional index, rebased to 100 at the start of the sample:
+
+```{python}
+amb.to_index_q_on_q().iloc[-3:, :]
+```
+
+For a less granular binned signal, `bands_indicator()` classifies each period into growth bands rather than just recession/expansion:
+
+```{python}
+amb.bands_indicator().set_index(["region", "datetime"]).unstack(0).tail()
+```
+
+There is also access to all of the internal data generated when the model runs. The raw Bayesian samples can be retrieved using `amb.trace`, while the full set of predictions and outturns are available through `amb.populate_results()`:
+
+```{python}
+amb.populate_results()
+```
+
+## Factor and macro loadings
+
+AMBRIC's hierarchical loadings — $\Lambda$ for the regional factors, $\Gamma$ for the macro covariates, and $\delta_r$ for the XGBoost bridge signal (see the README for the full specification) — can be inspected after fitting.
+
+```{python}
+amb.assemble_loadings_data().head()
+```
+
+```{python}
+amb.plot_loadings_by_region()
+```
+
+```{python}
+amb.plot_loadings_aggregate()
+```
+
+If you want to persist the fitted posterior to disk for reuse, call `amb.save_trace('path/to/trace.nc')`.
+

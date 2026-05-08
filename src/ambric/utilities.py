@@ -325,34 +325,47 @@ def simulate_data(
     """
     np.random.seed(seed)
 
-    # True factors (AR(1) processes)
+    # True factors (AR(1) processes).
     f_true = np.zeros((T, n_factors))
     for t in range(1, T):
-        f_true[t] = 0.7 * f_true[t - 1] + 0.3 * np.random.randn(n_factors)
+        f_true[t] = 0.4 * f_true[t - 1] + 0.022 * np.random.randn(n_factors)
 
-    # True macro indicators
+    # True macro indicators (z-scored, so std = 1)
     macro = np.zeros((T, n_macro))
     for m in range(n_macro):
-        macro[:, m] = 0.4 * f_true[:, 0] + 0.6 * np.cumsum(0.1 * np.random.randn(T))
+        macro[:, m] = 0.4 * f_true[:, 0] + 0.6 * np.cumsum(0.02 * np.random.randn(T))
         macro[:, m] = (macro[:, m] - macro[:, m].mean()) / macro[:, m].std()
 
-    # Loadings and Growth
-    Lambda_true = np.random.randn(R, n_factors) * 0.3
-    Gamma_true = np.random.randn(R, n_macro) * 0.2
-    sigma_eps = 0.15
-    y_reg_true = (
-        f_true @ Lambda_true.T
-        + macro @ Gamma_true.T
-        + sigma_eps * np.random.randn(T, R)
-    )
+    # Loadings: NON-ZERO MEAN so factors and macro drive *common* movement
+    # across regions (i.e. a shared business cycle). Zero-mean loadings
+    # produce regions with random + and – signs that cancel and leave no
+    # common cycle for the model to identify.
+    Lambda_true = 0.09 + np.random.randn(R, n_factors) * 0.04
+    Gamma_true = 0.002 + np.random.randn(R, n_macro) * 0.002
+
+    # Regional growth: AR(1) around an exogenous mean (mirrors the AMBRIC model DGP).
+    # phi_r=0.7 gives strongly persistent quarterly regional growth, matching
+    # the smooth dynamics seen in real regional GVA / GHDI series.
+    phi_r = 0.7 * np.ones(R)
+    sigma_eps = 0.002
+    mu_exog = f_true @ Lambda_true.T + macro @ Gamma_true.T
+    y_reg_true = np.zeros((T, R))
+    y_reg_true[0] = mu_exog[0] + sigma_eps * np.random.randn(R)
+    for t in range(1, T):
+        y_reg_true[t] = (
+            phi_r * y_reg_true[t - 1]
+            + (1 - phi_r) * mu_exog[t]
+            + sigma_eps * np.random.randn(R)
+        )
 
     # UK aggregate
     w_true = np.ones(R) / R
-    y_uk = y_reg_true @ w_true + 0.01 * np.random.randn(T)
+    y_uk = y_reg_true @ w_true + 0.0005 * np.random.randn(T)
 
-    # Regional indicator panels
+    # Regional indicator panels: strong factor loading + low noise so the
+    # extracted factors are a clean view of the latent f_true.
     Z_panel = [
-        f_true @ (np.random.randn(R, n_factors) * 0.5).T + 0.3 * np.random.randn(T, R)
+        f_true @ (np.random.randn(R, n_factors) * 1.0).T + 0.15 * np.random.randn(T, R)
         for _ in range(J)
     ]
 
@@ -363,7 +376,7 @@ def simulate_data(
             for r in range(R):
                 y_annual[t, r] = (
                     sum(OMEGA[j] * y_reg_true[t - j, r] for j in range(7))
-                    + 0.05 * np.random.randn()
+                    + 0.005 * np.random.randn()
                 )
 
     return y_uk, y_annual, y_reg_true, Z_panel, macro

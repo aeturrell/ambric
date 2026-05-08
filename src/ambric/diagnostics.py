@@ -82,6 +82,7 @@ def rmse_regions_annual(
     Args:
         y_annual_true (npt.NDArray[np.float64]): True regional annual growth rates
         annual_est_growth (npt.NDArray[np.float64]): Estimated regional annual growth rates
+
     Returns:
         list[float]: List of RMSE values for each region
     """
@@ -1350,34 +1351,6 @@ def recession_indicator(
             )
 
     return pd.DataFrame(results)
-
-
-def live_recession_indicator(
-    y_nowcast: npt.NDArray[np.float64],
-    datetime_ts: pd.Series,
-    region_names: list[str],
-) -> pd.DataFrame:
-    """Return recession indicator for nowcast growth q-on-4q, pivoted wide.
-
-    Args:
-        y_nowcast (npt.NDArray[np.float64]): Nowcast values, shape (T, R).
-        datetime_ts (pd.Series): Quarterly datetime index.
-        region_names (list[str]): Region names.
-
-    Returns:
-        pd.DataFrame: Wide-format frame with ``datetime`` as index and one
-            column per region containing the classification.
-    """
-
-    df = recession_indicator(
-        y_nowcast,
-        datetime_ts,
-        region_names,
-    )
-    df = df.pivot(
-        index="datetime", columns="region", values="classification"
-    ).reset_index()
-    return df
 
 
 def oos_q_on_4q_performance_table(

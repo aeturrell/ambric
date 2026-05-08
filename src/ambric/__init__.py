@@ -5,23 +5,17 @@ A Bayesian state-space model for estimating latent regional growth from
 sparse and temporally misaligned observations. Integrates
 XGBoost-driven annual regional predictions disaggregated to quarterly frequency via a MIDAS bridge equation as a core signal in the state-space dynamics.
 
-The model pipeline:
-    1. Extract factors from regional indicator panel (dimensionality reduction
-       for the Bayesian state-space component).
-    2. Train XGBoost on annually-aggregated raw regional indicators to predict
-       annual regional growth.
-    3. Fit a MIDAS bridge equation to disaggregate the XGBoost annual
-       predictions to quarterly frequency, producing s_{t,r}.
-    4. Build the Bayesian state-space model with factors, macro, and the
-       bridge signal jointly informing latent quarterly regional growth.
-    5. Estimate via variational inference.
+The model pipeline runs in five stages. First, factors are extracted from the
+regional indicator panel for dimensionality reduction in the Bayesian state-space
+component. Second, XGBoost is trained on annually-aggregated raw regional
+indicators to predict annual regional growth. Third, a MIDAS bridge equation
+disaggregates the XGBoost annual predictions to quarterly frequency, producing
+s_{t,r}. Fourth, the Bayesian state-space model is built with factors, macro,
+and the bridge signal jointly informing latent quarterly regional growth.
+Finally, estimation is done via variational inference.
 
-The core equation becomes:
-
-    y_{t,r} = phi_r * y_{t-1,r}
-              + (1 - phi_r) * (Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r})
-              + epsilon_{t,r}
-
+The core equation becomes
+y_{t,r} = phi_r * y_{t-1,r} + (1 - phi_r) * (Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r}) + epsilon_{t,r},
 where delta_r is estimated with a hierarchical shrinkage prior, allowing
 the model to learn the value of the XGBoost bridge signal per region.
 """
@@ -57,7 +51,6 @@ from xgboost import XGBRegressor
 from ambric.diagnostics import (
     assemble_loadings_data,
     bands_indicator,
-    live_recession_indicator,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
     plot_loadings_aggregate,
@@ -1327,36 +1320,6 @@ class Ambric:
         loadings_df = self.assemble_loadings_data()
         plot_loadings_aggregate(loadings_df, path=path)
         logger.info("Plotted loadings in aggregate by broad type.")
-
-    def live_recession_indicator(self, path: Path | None = None) -> pd.DataFrame:
-        """Produce a table indicating growth vs recession by region.
-
-        Uses q-on-4q annual growth estimates at quarterly frequency.
-
-        Args:
-            path (Path | None): Directory to save the table as Parquet. When
-                ``None`` no file is written.
-
-        Raises:
-            ValueError: If model not fitted.
-
-        Returns:
-            pd.DataFrame: Wide-format table with datetime index and one
-                column per region containing the classification.
-        """
-        if self.trace is None:
-            raise ValueError(
-                "Model trace is not available. Fit the model before calling this method."
-            )
-        _, _, y_a_r_est_point = trace_to_series(self.trace)
-        out_table = live_recession_indicator(
-            y_a_r_est_point,
-            region_names=self.region_names,
-            datetime_ts=self.datetime_ts,
-        )
-        if path:
-            out_table.to_parquet(path / "recession_indicator.parquet")
-        return out_table
 
     def bands_indicator(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table indicating bands

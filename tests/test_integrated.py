@@ -66,7 +66,6 @@ def test_vanilla_run(mock_show) -> None:
     amb.plot_estimated_regional_quarterly()
     amb.plot_current_nowcast()
     amb.bands_indicator()
-    amb.live_recession_indicator()
     amb.point_estimates_q_on_4q()
     amb.point_estimates_q_on_q()
     amb.to_index_q_on_q()
@@ -175,7 +174,6 @@ def test_vanilla_run_one_region_no_lag(mock_show) -> None:
     amb.plot_single_region_annual_estimate(region_name=target_region)
     amb.plot_estimated_regional_quarterly()
     amb.plot_current_nowcast()
-    amb.live_recession_indicator()
     amb.point_estimates_q_on_4q()
 
     mock_show.assert_called()
