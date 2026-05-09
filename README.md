@@ -12,7 +12,7 @@
 
 
 ![](https://img.shields.io/badge/mac%20os-000000?style=for-the-badge&logo=macos&logoColor=F0F0F0)
-
+![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 
 ## **Augmented Mixed-frequency Bayesian Regional Inference with Constraints**
 
@@ -44,6 +44,8 @@ The core model features are:
 - Dimensional reduction: With a rich set of data on each region, it would be extremely difficult to solve the model due to the increasing number of parameters. Factor analysis is applied to the panel of regional indicators first to reduce the dimensionality to a manageable level.
 
 - XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. This allows the model to incorporate non-linear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
+
+AMBRIC is currently supported on macOS and Linux only; Windows users should run AMBRIC under WSL.
 
 ## Model Details
 
