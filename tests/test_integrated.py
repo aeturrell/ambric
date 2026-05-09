@@ -238,7 +238,7 @@ def test_early_covariate_truncation() -> None:
 def test_pseudo_realtime_directly(mock_show) -> None:
     """Direct function to run realtime simulation."""
 
-    T = 100
+    T = 60
     R = 10
     J = 3
     n_factors = 2
@@ -250,15 +250,13 @@ def test_pseudo_realtime_directly(mock_show) -> None:
     aggregate_measure: str = "gva_q_on_q"
     aggregation_region: str = "uk"
     region_measure: str = "gva_q_on_4q"
-    n_its = 1000
-    n_posterior_samples = 1000
+    n_its = 200
+    n_posterior_samples = 200
     region_names = [x for x in df["region"].unique() if x != aggregation_region]
     macro_names = [x for x in df["measure"].unique() if "macro" in x]
     region_covariate_names = [
         x for x in df["measure"].unique() if "regional_covar" in x
     ]
-
-    aggregation_region = "uk"
 
     df_results = run_out_of_sample_exercise(
         df,
@@ -272,15 +270,57 @@ def test_pseudo_realtime_directly(mock_show) -> None:
         n_its=n_its,
         n_posterior_samples=n_posterior_samples,
         lag_qtrs=lag_qtrs,
-        step_size=1,
+        step_size=8,
     )
 
     plot_out_of_sample_rmse(df_results, region_measure=region_measure)
     plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
     oos_q_on_4q_performance_table(df_results, region_measure)
-    # Below requires small step size
-    trend_adjust_out_of_sample_results(df_results, quarters_to_pub=lag_qtrs)
     mock_show.assert_called()
+
+
+def test_trend_adjust_out_of_sample_results() -> None:
+    """`trend_adjust_out_of_sample_results` runs X13 on the q-on-q nowcast
+    series for a given `quarters_to_publication` slice. It needs a long,
+    contiguous quarterly series per region but does not depend on the model
+    fit, so we build a synthetic `df_results` directly instead of paying for
+    a step_size=1 OOS run."""
+    rng = np.random.default_rng(0)
+    n_quarters = 60
+    quarters_to_pub = 6.0
+    datetimes = pd.date_range("2005-03-31", periods=n_quarters, freq="QE")
+    regions = [f"region_{i:02d}" for i in range(3)]
+
+    rows = []
+    for r_idx, region in enumerate(regions):
+        # Decimal q-on-q growth with mild seasonality + drift + noise.
+        seasonal = 0.002 * np.sin(2 * np.pi * np.arange(n_quarters) / 4)
+        drift = 0.001 + 0.0002 * r_idx
+        noise = rng.normal(0.0, 0.001, size=n_quarters)
+        values = drift + seasonal + noise
+        for dt, v, idx in zip(datetimes, values, range(n_quarters), strict=True):
+            rows.append(
+                {
+                    "datetime": dt,
+                    "measure": "q_on_q",
+                    "region": region,
+                    "value": v,
+                    "quarters_to_publication": quarters_to_pub,
+                    "nowcast_index": idx,
+                    "type": "nowcast",
+                }
+            )
+    df_results = pd.DataFrame(rows)
+
+    df_trend = trend_adjust_out_of_sample_results(
+        df_results, quarters_to_pub=quarters_to_pub
+    )
+
+    assert not df_trend.empty
+    assert {"estimate", "seasonally_adjusted", "trend", "region", "measure"}.issubset(
+        df_trend.columns
+    )
+    assert set(df_trend["region"].unique()) == set(regions)
 
 
 @patch("matplotlib.pyplot.show")
