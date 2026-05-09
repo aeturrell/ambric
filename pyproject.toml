@@ -1,17 +1,17 @@
 [project]
 name = "ambric"
 version = "0.0.2"
-description = "Factor-Analytic Bayesian Regional Inference with Constraints"
+description = "Augmented Mixed-frequency Bayesian Regional Inference with Constraints"
 authors = [{name="Arthur Turrell", email="anon@anon.gmail.com"}]
 readme = "README.md"
 license = "MIT"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "arviz>=0.23.1",
     "graphviz>=0.21",
@@ -44,6 +44,7 @@ dev = [
     "pydoclint>=0.6.0",
     "ty>=0.0.14",
     "typeguard>=4.4.4",
+    "great-docs[svg]>=0.10.0",
 ]
 
 [tool.uv]

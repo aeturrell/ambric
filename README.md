@@ -11,19 +11,19 @@
 [![Source](https://img.shields.io/badge/source%20code-github-lightgrey?style=for-the-badge)](https://github.com/aeturrell/ambric)
 
 
-![macOS](https://img.shields.io/badge/mac%20os-000000?style=for-the-badge&logo=macos&logoColor=F0F0F0)
-
+![](https://img.shields.io/badge/mac%20os-000000?style=for-the-badge&logo=macos&logoColor=F0F0F0)
+![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 
 ## **Augmented Mixed-frequency Bayesian Regional Inference with Constraints**
 
-AMBRIC is a Bayesian state-space model for estimating latent regional growth in a given variable from sparse and temporally misaligned observations. It combines factor analysis, autoregressive dynamics at both the factor and regional level, and observation constraints from aggregate (UK-wide) and Annual regional data.
+AMBRIC is a Bayesian state-space model for estimating latent regional growth in a given variable from sparse and temporally misaligned observations. It combines factor analysis, autoregressive dynamics at both the factor and regional level, and observation constraints from aggregate (country-wide) and annual regional data.
 
 **When would I need this model?**
 
 - When you have a highly lagged annual release of, say, economic growth at the regional level but quarterly growth at the national level with minimal lag.
 - When you want to nowcast regional growth—both quarterly and annual—from published national quarterly growth.
 
-It was originally designed to nowcast UK gross value-added (GVA) for regions following the publication of the equivalent quarterly national growth rate.
+It was originally designed to nowcast UK gross value-added (GVA) and gross household disposable income (GHDI) for regions following the publication of the equivalent quarterly national growth rate.
 
 The core model features are:
 
@@ -45,6 +45,8 @@ The core model features are:
 
 - XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. This allows the model to incorporate non-linear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
 
+AMBRIC is currently supported on macOS and Linux only; Windows users should run AMBRIC under WSL.
+
 ## Model Details
 
 ### Variable Definitions
@@ -57,7 +59,7 @@ Let $Y$ be the variable of interest in levels.
 - $y^\text{UK}_t = \log(Y^\text{UK}_t) - \log(Y^\text{UK}_{t-1})$ is the quarterly growth rate for the whole nation (observed).
 - $Y_{t, r}$ is the level for region $r$ in quarter $t$ (never observed)
 - $Y_{t, r}^A = Y_{t, r} + Y_{t-1, r} + Y_{t-2, r} + Y_{t-3, r}$ is the annual level for region $r$. Observed for Q4 only, and with a lag.
-- $y_{t, r}^A = \log(Y_{t, r}^A) - \log(Y^{r,A}_{t-4,r})$ is the annual growth in region $r$; observed Q4 only. $y^A_t = (y^{A}_{t,1}, \ldots, y_{t, r}^A)'$ is the vector of these.
+- $y_{t, r}^A = \log(Y_{t, r}^A) - \log(Y^{A}_{t-4,r})$ is the annual growth in region $r$; observed Q4 only. $y^A_t = (y^{A}_{t,1}, \ldots, y_{t, r}^A)'$ is the vector of these.
 - $y_{t, r} = \log(Y_{t, r}) - \log(Y_{t-1, r})$ is the quarterly growth rate in region $r$ (never observed). $y^Q_t = (y_{t,1}, \ldots, y_{t, r})'$ is the vector of these.
 - $\boldsymbol{Z}_t$ is a panel of regional indicators, with elements $Z_{j,r,t}$.
 - $s_{t,r}$ is a quarterly bridge signal for region $r$, derived from XGBoost annual predictions disaggregated via a MIDAS bridge equation. $\mathbf{s}_t = (s_{t,1}, \ldots, s_{t,R})'$ is the vector of these.
@@ -80,11 +82,11 @@ The core equation of AMBRIC is:
 
 $$
 \begin{equation}
-\mathbf{y}_t = \boldsymbol{\Phi}_r \mathbf{y}_{t-1} + (\mathbf{I} - \boldsymbol{\Phi}_r)(\boldsymbol{\Lambda} \boldsymbol{\Phi}_f \mathbf{F}_{t-1} + \boldsymbol{\Gamma} \mathbf{X}_t + \boldsymbol{\delta} \odot \mathbf{s}_t) + \boldsymbol{\epsilon}_t
+\mathbf{y}_t = \boldsymbol{\Phi}_r \mathbf{y}_{t-1} + (\mathbf{I} - \boldsymbol{\Phi}_r)(\boldsymbol{\Lambda} \mathbf{F}_t + \boldsymbol{\Gamma} \mathbf{X}_t + \boldsymbol{\delta} \odot \mathbf{s}_t) + \boldsymbol{\epsilon}_t
 \end{equation}
 $$
 
-where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive terms in equation (1) are diagonal matrices; $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$, and $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$. $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication (the Hadamard product.)
+where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive term in equation (1) is a diagonal matrix, $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$. The factors $\mathbf{F}_t$ themselves follow an AR(1) process governed by $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$ (see below). $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication (the Hadamard product.)
 
 #### Observed vs estimated data
 
@@ -127,10 +129,10 @@ Note that the $(1 - \phi_r)$ scaling ensures that $\mathbb{E}[y_{t,r}] = \mu_{t,
 To reduce the dimensionality of $\boldsymbol{Z}_t$, the panel of regional indicators, we use *factor analysis*, which finds an $\boldsymbol{F}_t^{\text{obs}}$ with dimension $K$ such that
 
 $$
-\mathbf{F}_t = \mathbf{Z}_t \mathbf{W} + \boldsymbol{\mu}, \quad \mathbf{Z}_t \sim \mathcal{N}(\mathbf{0}, \mathbf{I}_K), \quad \text{Cov}(\mathbf{F}_t) = \mathbf{W}^\top \mathbf{W} + \boldsymbol{\Psi}
+\mathbf{Z}_t = \mathbf{W} \mathbf{F}_t^{\text{obs}} + \boldsymbol{\mu} + \boldsymbol{\varepsilon}_t, \quad \mathbf{F}_t^{\text{obs}} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}_K), \quad \boldsymbol{\varepsilon}_t \sim \mathcal{N}(\mathbf{0}, \boldsymbol{\Psi}), \quad \text{Cov}(\mathbf{Z}_t) = \mathbf{W} \mathbf{W}^\top + \boldsymbol{\Psi}
 $$
 
-where these factors are autoregressive such that
+where $\mathbf{W}$ is the matrix of factor loadings and $\boldsymbol{\Psi}$ is a diagonal matrix of indicator-specific noise variances. These extracted factors are then treated as noisy observations of an underlying autoregressive latent factor process $\mathbf{F}_t$ such that
 
 $$
 \mathbf{F}_t = \text{diag}(\boldsymbol{\phi}_f) \mathbf{F}_{t-1} + \boldsymbol{\eta}_t, \quad \mathbf{F}_t^{\text{obs}} = \mathbf{F}_t + \boldsymbol{\epsilon}_t^f
@@ -180,7 +182,7 @@ $$\nu_{\text{A}} \sim \text{Gamma}(3, 0.5)$$
 
 ##### Growth
 
-$$\sigma_\varepsilon \sim \text{HalfNormal}(0.03) \quad [R]$$
+$$\sigma_\varepsilon \sim \text{HalfNormal}(0.1) \quad [R]$$
 
 $$\sigma_{\text{A}} \sim \text{HalfNormal}(0.2) \quad [R]$$
 

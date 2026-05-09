@@ -6,7 +6,7 @@ from textwrap import dedent
 import nox
 
 package = "ambric"
-python_versions = ["3.11", "3.12", "3.13"]
+python_versions = ["3.12", "3.13", "3.14"]
 nox.needs_version = ">= 2024.10.9"
 nox.options.default_venv_backend = "uv"
 nox.options.sessions = (
