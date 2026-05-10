@@ -1,0 +1,111 @@
+name: Release
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.2"
+
+      - name: Check if there is a parent commit
+        id: check-parent-commit
+        run: |
+          echo "sha=$(git rev-parse --verify --quiet HEAD^)" >> "$GITHUB_OUTPUT"
+
+      - name: Detect and tag new version
+        id: check-version
+        if: steps.check-parent-commit.outputs.sha
+        uses: salsify/action-detect-and-tag-new-version@v2.0.3
+        with:
+          version-command: |
+            uvx --from=toml-cli toml get --toml-path=pyproject.toml project.version
+
+      - name: Bump version for developmental release
+        if: "! steps.check-version.outputs.tag"
+        run: |
+          uv run version_bumper.py &&
+          version=$(uvx --from=toml-cli toml get --toml-path=pyproject.toml project.version) &&
+          uvx --from=toml-cli toml set --toml-path=pyproject.toml project.version $version.dev.$(date +%s)
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish package on PyPI
+        if: steps.check-version.outputs.tag
+        uses: pypa/gh-action-pypi-publish@v1.14.0
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Publish package on TestPyPI
+        if: "! steps.check-version.outputs.tag"
+        uses: pypa/gh-action-pypi-publish@v1.14.0
+        with:
+          user: __token__
+          password: ${{ secrets.TEST_PYPI_TOKEN }}
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish the release notes
+        uses: release-drafter/release-drafter@v7.2.0
+        with:
+          publish: ${{ steps.check-version.outputs.tag != '' }}
+          tag: ${{ steps.check-version.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Docs: rebuild with execution and deploy on tagged releases ----
+
+      - name: Install dependencies
+        if: steps.check-version.outputs.tag
+        run: |
+          uv sync --group dev
+          uv pip install -e .
+          uv pip install great-docs
+
+      - name: Set up Quarto
+        if: steps.check-version.outputs.tag
+        uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          version: 1.6.39
+
+      - name: Build docs (with execution)
+        if: steps.check-version.outputs.tag
+        run: uv run great-docs build
+
+      - name: Upload Pages artifact
+        if: steps.check-version.outputs.tag
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: great-docs/_site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        if: steps.check-version.outputs.tag
+        uses: actions/deploy-pages@v5
