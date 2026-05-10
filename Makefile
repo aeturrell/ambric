@@ -1,29 +1,14 @@
-# This makes the documentation for ambric
-# In practice, though, done in the GitHub Action (release)
-.PHONY: all site publish
+# Builds the documentation for ambric locally.
+# In CI, docs are built and deployed by .github/workflows/release.yml.
+.PHONY: all site
 
-all: README.md site
+all: site
 
-# Build the readme
-README.md: docs/index.qmd
-		cp docs/index.qmd README.md
-
-
-# Build the github pages site
+# Build the GitHub Pages site with great-docs.
+# Output is written to great-docs/_site/ (ephemeral build directory).
 site:
-		uv pip install -e .
-		uv run quartodoc build --config docs/_quarto.yml
-		cd docs; uv run quarto render --execute
-		rm docs/.gitignore
-		uv run nbstripout docs/*.ipynb
-		uv run pre-commit run --all-files
-
-
-publish:
-		uv pip install -e .
-		uv run quartodoc build --config docs/_quarto.yml
-		cd docs;uv run quarto render --execute
-		cd docs;uv run quarto publish gh-pages --no-render
-		rm docs/.gitignore
-		uv run nbstripout docs/*.ipynb
-		uv run pre-commit run --all-files
+	uv pip install -e .
+	uv pip install great-docs
+	uv run great-docs build
+	uv run nbstripout docs/*.ipynb
+	uv run pre-commit run --all-files
