@@ -1,6 +1,6 @@
 [project]
 name = "ambric"
-version = "0.0.2"
+version = "0.0.3"
 description = "Augmented Mixed-frequency Bayesian Regional Inference with Constraints"
 authors = [{name="Arthur Turrell", email="anon@anon.gmail.com"}]
 readme = "README.md"
