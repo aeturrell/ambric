@@ -1,0 +1,98 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "🚀 Features"
+    labels:
+      - "feature"
+      - "enhancement"
+  - title: "🐛 Bug Fixes"
+    labels:
+      - "fix"
+      - "bug"
+  - title: "📚 Documentation"
+    labels:
+      - "documentation"
+      - "docs"
+  - title: "🧰 Maintenance"
+    labels:
+      - "chore"
+      - "refactor"
+      - "dependencies"
+      - "ci"
+  - title: "⚠️ Breaking Changes"
+    labels:
+      - "breaking"
+
+change-template: "- $TITLE (#$NUMBER) @$AUTHOR"
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  major:
+    labels:
+      - "major"
+      - "breaking"
+  minor:
+    labels:
+      - "minor"
+      - "feature"
+      - "enhancement"
+  patch:
+    labels:
+      - "patch"
+      - "fix"
+      - "bug"
+      - "chore"
+      - "refactor"
+      - "documentation"
+      - "docs"
+      - "dependencies"
+      - "ci"
+  default: patch
+
+exclude-labels:
+  - "skip-changelog"
+  - "no-changelog"
+
+autolabeler:
+  - label: "documentation"
+    files:
+      - "docs/**"
+      - "*.md"
+      - "great-docs/**"
+      - "great-docs.yml"
+  - label: "ci"
+    files:
+      - ".github/**"
+      - "noxfile.py"
+  - label: "dependencies"
+    files:
+      - "pyproject.toml"
+      - "uv.lock"
+  - label: "fix"
+    branches:
+      - "fix/.+"
+      - "bugfix/.+"
+    title:
+      - "/^fix(\\(.+\\))?:/i"
+  - label: "feature"
+    branches:
+      - "feat/.+"
+      - "feature/.+"
+    title:
+      - "/^feat(\\(.+\\))?:/i"
+  - label: "chore"
+    branches:
+      - "chore/.+"
+    title:
+      - "/^chore(\\(.+\\))?:/i"
+  - label: "breaking"
+    title:
+      - "/^[a-z]+(\\(.+\\))?!:/i"
+
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
