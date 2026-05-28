@@ -50,7 +50,7 @@ from xgboost import XGBRegressor
 
 from ambric.diagnostics import (
     assemble_loadings_data,
-    bands_indicator,
+    economic_pulse_indicator,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
     plot_loadings_aggregate,
@@ -1321,8 +1321,8 @@ class Ambric:
         plot_loadings_aggregate(loadings_df, path=path)
         logger.info("Plotted loadings in aggregate by broad type.")
 
-    def bands_indicator(self, path: Path | None = None) -> pd.DataFrame:
-        """Produce a table indicating bands
+    def economic_pulse_indicator(self, path: Path | None = None) -> pd.DataFrame:
+        """Produce a table indicating the economic pulse.
 
         Uses seasonally adjusted q-on-q growth estimates at quarterly frequency.
 
@@ -1345,18 +1345,19 @@ class Ambric:
         df_sa_trend_orig = df_sa_trend_orig.loc[
             df_sa_trend_orig["type"] == "trend", ["q_on_q", "region"]
         ].copy()
+        sorted_region_names = sorted(self.region_names)
         long_format = df_sa_trend_orig.pivot(columns="region", values="q_on_q")
-        long_format = long_format[self.region_names]
+        long_format = long_format[sorted_region_names]
         # First row is NaN from pct_change; drop it and align datetime_ts.
         long_format = long_format.iloc[1:]
-        out_table = bands_indicator(
+        out_table = economic_pulse_indicator(
             np.array(long_format.values),
-            region_names=self.region_names,
+            region_names=sorted_region_names,
             datetime_ts=self.datetime_ts.iloc[1:],
         )
 
         if path:
-            out_table.to_parquet(path / "bands_indicator.parquet")
+            out_table.to_parquet(path / "economic_pulse_indicator.parquet")
         return out_table
 
     def point_estimates_q_on_4q(self, path: Path | None = None) -> pd.DataFrame:
@@ -1432,7 +1433,7 @@ class Ambric:
     def to_index_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast index.
 
-        Returns index to earliest data point (rounded to 2 d.p.) at quarterly frequency.
+        Returns index to earliest data point at quarterly frequency.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1457,13 +1458,12 @@ class Ambric:
                 columns=pd.Index(self.region_names),
             )
             * 100
-        ).round(2)
+        )
         df_q_on_q.index.name = "datetime"
         start_value = 100.0
         # Convert percentage growth rates to an index:
         # growth factors = 1 + rate/100, then cumulative product scaled by start_value
         df_index = start_value * (1 + df_q_on_q / 100).cumprod()
-        df_index = df_index.round(2)
 
         if path:
             df_index.to_parquet(path / "index_estimates_q_on_q.parquet")
@@ -1487,68 +1487,30 @@ class Ambric:
             pd.DataFrame: Wide-format table with datetime index and one
                 column per region containing the point estimate.
         """
-        indices = self.to_index_q_on_q()
-        # seasonal adjustment needs a period index
-        indices.index = pd.to_datetime(indices.index).to_period()
-        # Seasonal adjustment here
-        spec = jd.x13_spec("rsa5c")
-        # Force log transformation (no automatic detection)
-        spec["regarima"]["transform"]["fn"] = "LOG"
-
-        # Disable transitory component (TC) outlier detection
-        spec["regarima"]["outlier"]["outliers"] = [
-            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
-        ]
-        # Disable trading day regressors (suitable for quarterly data)
-        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
-        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
-        spec = jd.x13_spec("rsa5c")
-        # Force log transformation (no automatic detection)
-        spec["regarima"]["transform"]["fn"] = "LOG"
-
-        # Disable transitory component (TC) outlier detection
-        spec["regarima"]["outlier"]["outliers"] = [
-            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
-        ]
-        # Disable trading day regressors (suitable for quarterly data)
-        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
-        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
-        spec = jd.x13_spec("rsa5c")
-        # Force log transformation (no automatic detection)
-        spec["regarima"]["transform"]["fn"] = "LOG"
-
-        # Disable transitory component (TC) outlier detection
-        spec["regarima"]["outlier"]["outliers"] = [
-            o for o in spec["regarima"]["outlier"]["outliers"] if o["type"] != "TC"
-        ]
-
-        # Disable trading day regressors (suitable for quarterly data)
-        spec["regarima"]["regression"]["td"]["td"] = "TD_NONE"
-        spec["regarima"]["regression"]["td"]["auto"] = "AUTO_NO"
-
-        def extract_into_df(ts_in: pd.Series, region: str, type: str):
-            new_df = pd.DataFrame(ts_in).copy()
-            new_df["region"] = region
-            new_df["type"] = type
-            return new_df
+        if self.trace is None:
+            raise ValueError(
+                "Model trace is not available. Fit the model before calling this method."
+            )
+        _, y_q_r_est_point, _ = trace_to_series(self.trace)
+        df_q_on_q = (
+            pd.DataFrame(
+                y_q_r_est_point,
+                index=self.datetime_ts,
+                columns=pd.Index(self.region_names),
+            )
+            * 100
+        )
+        df_q_on_q.index.name = "datetime"
 
         df_sa_trend_orig = pd.DataFrame()
-        for region in list(indices.columns):
-            ts_here = indices.loc[:, region].copy()
-            result = jd.x13(indices.loc[:, region], spec)
-            res = result["result"]  # ty: ignore[not-subscriptable]
-            sa = res["final"]["d11final"]  # seasonally adjusted series
-            trend = res["final"]["d12final"]  # trend
-            # seasonal = result["result"]["final"]["d16"]  # seasonal component
-            sa = extract_into_df(sa, region, "seasonally_adjusted").rename(
-                columns={0: "value"}
+        for region in self.region_names:
+            series = df_q_on_q[region].rename("value")
+            df_regional = extract_components(series)
+            df_long = df_regional.melt(
+                ignore_index=False, var_name="type", value_name="value"
             )
-            trend = extract_into_df(trend, region, "trend").rename(columns={0: "value"})
-            # seasonal = extract_into_df(seasonal, region, "seasonal").rename(columns={0:"value"})
-            ts_here = extract_into_df(ts_here, region, "estimate").rename(
-                columns={region: "value"}
-            )
-            df_sa_trend_orig = pd.concat([df_sa_trend_orig, ts_here, sa, trend], axis=0)
+            df_long["region"] = region
+            df_sa_trend_orig = pd.concat([df_sa_trend_orig, df_long], axis=0)
         df_sa_trend_orig["q_on_q"] = 100 * df_sa_trend_orig.groupby(
             ["region", "type"]
         ).transform("pct_change")
@@ -1769,25 +1731,22 @@ def trend_adjust_out_of_sample_results(
     return df_trend
 
 
-def bands_indicator_out_of_sample_results(
+def economic_pulse_indicator_out_of_sample_results(
     df_results: pd.DataFrame,
     path: Path | None = None,
-    bands: list[float] = [-0.8, -0.1, 0.1, 0.8],  # noqa: B006
 ) -> pd.DataFrame:
-    """Bands classification of out-of-sample trend q-on-q nowcasts.
+    """Economic pulse classification of out-of-sample trend q-on-q nowcasts.
 
     For every ``(region, datetime, quarters_to_publication, nowcast_index)``
     in the OOS results, extracts the X13 trend of the q-on-q nowcast (per
     ``quarters_to_publication`` slice), converts it back to q-on-q growth in
     percentage points, and classifies into bands using
-    :func:`~ambric.diagnostics.bands_indicator`.
+    :func:`~ambric.diagnostics.economic_pulse_indicator`.
 
     Args:
         df_results (pd.DataFrame): Output of :func:`run_out_of_sample_exercise`.
         path (Path | None): Directory to save the table as Parquet. When
             ``None`` no file is written.
-        bands (list[float]): Interior bin edges in percentage points.
-            Defaults to ``[-0.8, -0.1, 0.1, 0.8]``.
 
     Returns:
         pd.DataFrame: Long-format frame with columns ``region``, ``datetime``,
@@ -1804,7 +1763,7 @@ def bands_indicator_out_of_sample_results(
             .set_index("datetime")["nowcast_index"]
             .sort_index()
         )
-        region_names = list(df_qtp["region"].unique())
+        region_names = sorted(df_qtp["region"].unique())
         trend_qoq_by_region: dict[str, pd.Series] = {}
         for region in region_names:
             series = df_qtp.loc[
@@ -1816,11 +1775,10 @@ def bands_indicator_out_of_sample_results(
         wide = pd.DataFrame(trend_qoq_by_region)[region_names]
         wide = wide.iloc[1:]
         datetime_ts = pd.Series(wide.index.to_timestamp(), name="datetime")
-        long = bands_indicator(
+        long = economic_pulse_indicator(
             np.array(wide.values),
             region_names=region_names,
             datetime_ts=datetime_ts,
-            bands=bands,
         )
         long["quarters_to_publication"] = qtp
         long["nowcast_index"] = long["datetime"].map(idx_map)
@@ -1835,7 +1793,5 @@ def bands_indicator_out_of_sample_results(
         ]
     ]
     if path:
-        out_to_write = out.copy()
-        out_to_write["classification"] = out_to_write["classification"].astype(str)
-        out_to_write.to_parquet(path / "oos_results_bands_indicator.parquet")
+        out.to_parquet(path / "oos_results_economic_pulse_indicator.parquet")
     return out

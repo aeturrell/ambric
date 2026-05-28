@@ -96,7 +96,7 @@ reference:
       - Ambric.assemble_loadings_data
       - Ambric.plot_loadings_by_region
       - Ambric.plot_loadings_aggregate
-      - Ambric.bands_indicator
+      - Ambric.economic_pulse_indicator
       - Ambric.point_estimates_q_on_4q
       - Ambric.point_estimates_q_on_q
       - Ambric.to_index_q_on_q
@@ -105,7 +105,7 @@ reference:
   - title: Functions
     desc: Utility functions
     contents:
-      - bands_indicator_out_of_sample_results
+      - economic_pulse_indicator_out_of_sample_results
       - build_ambric_model
       - diagnostics.oos_q_on_4q_performance_table
       - diagnostics.plot_out_of_sample_nowcasts
