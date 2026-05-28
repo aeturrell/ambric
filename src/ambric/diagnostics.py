@@ -1242,7 +1242,7 @@ def plot_current_nowcast(
     plt.close()
 
 
-def bands_indicator(
+def economic_pulse_indicator(
     y_nowcast: npt.NDArray[np.float64],
     datetime_ts: pd.Series,
     region_names: list[str],
@@ -1282,7 +1282,7 @@ def bands_indicator(
     df = df.reset_index().melt(
         id_vars="datetime", var_name="region", value_name="value"
     )
-    df["classification"] = pd.cut(df["value"], bins=bins, labels=band_names)
+    df["classification"] = pd.cut(df["value"], bins=bins, labels=band_names).astype(str)
 
     return df[["datetime", "region", "classification"]]
 

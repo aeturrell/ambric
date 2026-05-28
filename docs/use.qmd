@@ -106,10 +106,10 @@ These can be turned into a regional index, rebased to 100 at the start of the sa
 amb.to_index_q_on_q().iloc[-3:, :]
 ```
 
-For a less granular binned signal, `bands_indicator()` classifies each period into growth bands rather than just recession/expansion:
+For a less granular binned signal, `economic_pulse_indicator()` classifies each period into growth bands rather than just recession/expansion:
 
 ```{python}
-amb.bands_indicator().set_index(["region", "datetime"]).unstack(0).tail()
+amb.economic_pulse_indicator().set_index(["region", "datetime"]).unstack(0).tail()
 ```
 
 There is also access to all of the internal data generated when the model runs. The raw Bayesian samples can be retrieved using `amb.trace`, while the full set of predictions and outturns are available through `amb.populate_results()`:
