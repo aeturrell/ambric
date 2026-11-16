@@ -321,6 +321,9 @@ def train_xgboost_annual(
     regional indicators Z_{j,r} and macro variables, aggregated to annual
     frequency by averaging across quarters.
 
+    Predictions for observed region-years are made leave-one-year-out, so
+    that nothing downstream is fitted to XGBoost's in-sample fit.
+
     Args:
         Z_panel: List of J arrays, each (T, R). Regional indicator panels.
         macro: (T, M) national macro series.
@@ -331,43 +334,46 @@ def train_xgboost_annual(
 
     Returns:
         Tuple of (fitted XGBRegressor, annual predictions (n_years, R)).
+
+        The predictions are growth rates. For region-years with an observed
+        outturn they are out-of-fold: each year is predicted by a model
+        trained on all the other years. Region-years without an outturn are
+        predicted by the returned regressor, which is trained on every
+        observation.
+
         The regressor is fitted to the standardised target; multiply its
         predictions by ``model.target_scale_`` and add ``model.target_mean_``
-        to get growth rates. The returned predictions are already growth rates.
+        to get growth rates. It also carries ``out_of_fold_rmse_``,
+        ``in_sample_rmse_``, ``out_of_fold_`` (False if only one year was
+        observed) and ``edge_year_preds_``: a pair of (R,) predictions for
+        the incomplete years before the first Q1 and after the last Q4, made
+        from the quarters available, or ``None`` where there is no such year.
     """
     T, R = y_annual.shape
     J = len(Z_panel)
     M = macro.shape[1]
     n_years = _n_complete_years(T, q1_offset)
 
+    # features[a, r] holds the annual-average indicators for region r in
+    # complete year a, followed by the annual-average macro series.
     macro_annual = _aggregate_quarterly_to_annual(macro, q1_offset)
-
-    # Build pooled training panel
-    X_rows = []
-    y_rows = []
-
+    features = np.empty((n_years, R, J + M))
     for r in range(R):
         Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r, q1_offset)
+        features[:, r, :J] = _aggregate_quarterly_to_annual(Z_r, q1_offset)
+        features[:, r, J:] = macro_annual
+    q4_rows = q1_offset + 4 * np.arange(n_years) + 3
+    targets = y_annual[q4_rows] if n_years > 0 else np.empty((0, R))
+    observed = ~np.isnan(targets)
 
-        for a in range(n_years):
-            q4_idx = q1_offset + 4 * a + 3
-            if not np.isnan(y_annual[q4_idx, r]):
-                features = np.concatenate([Z_r_annual[a], macro_annual[a]])
-                X_rows.append(features)
-                y_rows.append(y_annual[q4_idx, r])
-
-    if not X_rows:
+    if not observed.any():
         raise ValueError(
             "No observed annual regional data available for XGBoost training. "
             "Ensure y_annual contains at least one non-NaN value at a Q4 index."
         )
 
-    X_train = np.array(X_rows)
-    y_train = np.array(y_rows)
-
     logger.info(
-        f"XGBoost: Training on {len(y_train)} region-year observations "
+        f"XGBoost: Training on {int(observed.sum())} region-year observations "
         f"({J + M} features: {J} regional indicators + {M} macro)."
     )
 
@@ -381,39 +387,86 @@ def train_xgboost_annual(
         reg_lambda=5.0,
         min_child_weight=3,
         random_state=42,
+        # The panel is small, so one thread is as fast as several and
+        # avoids stalls when other processes are using the CPU.
+        n_jobs=1,
     )
     if xgb_params is not None:
         default_params.update(xgb_params)
 
-    # The regularisation settings act on the size of the target, so the
-    # target is standardised for fitting and predictions are converted back.
-    # The fit is then the same whatever units growth is measured in.
-    y_mean = float(y_train.mean())
-    y_scale = float(y_train.std())
-    if y_scale == 0:
-        y_scale = 1.0
+    def _fit(train: npt.NDArray[np.bool_]) -> XGBRegressor:
+        """Fit to the region-years flagged in ``train`` (n_years, R)."""
+        y_train = targets[train]
+        # The regularisation settings act on the size of the target, so the
+        # target is standardised for fitting and predictions are converted
+        # back. The fit is then the same whatever units growth is in.
+        y_scale = float(y_train.std())
+        fitted = XGBRegressor(**default_params)
+        fitted.target_mean_ = float(y_train.mean())
+        fitted.target_scale_ = y_scale if y_scale > 0 else 1.0
+        fitted.fit(
+            features[train], (y_train - fitted.target_mean_) / fitted.target_scale_
+        )
+        return fitted
 
-    def _predict(features: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        return model.predict(features) * y_scale + y_mean
+    def _predict(
+        fitted: XGBRegressor, X: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        return fitted.predict(X) * fitted.target_scale_ + fitted.target_mean_
 
-    model = XGBRegressor(**default_params)
-    model.fit(X_train, (y_train - y_mean) / y_scale)
-    # Recorded so that the fitted model can be used outside this function.
-    model.target_mean_ = y_mean
-    model.target_scale_ = y_scale
+    # The model trained on every observation is used only where there is no
+    # outturn: unpublished years, and the incomplete years at either end.
+    model = _fit(observed)
+    in_sample_preds = _predict(model, features.reshape(-1, J + M)).reshape(n_years, R)
+    xgb_annual_preds = in_sample_preds.copy()
 
-    # Predict for all region-years
-    xgb_annual_preds = np.full((n_years, R), np.nan)
-    for r in range(R):
-        Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r, q1_offset)
-        for a in range(n_years):
-            features = np.concatenate([Z_r_annual[a], macro_annual[a]])
-            xgb_annual_preds[a, r] = _predict(features.reshape(1, -1))[0]
+    # Where an outturn exists, the prediction comes from a model that never
+    # saw that year (leave-one-year-out). The bridge equation is fitted to
+    # these predictions, so it learns how reliable XGBoost is out of sample
+    # rather than how well it can reproduce its own training data.
+    observed_years = np.flatnonzero(observed.any(axis=1))
+    out_of_fold = len(observed_years) > 1
+    if out_of_fold:
+        for a in observed_years:
+            train = observed.copy()
+            train[a] = False
+            fold_model = _fit(train)
+            xgb_annual_preds[a, observed[a]] = _predict(
+                fold_model, features[a, observed[a]]
+            )
+    else:
+        logger.warning(
+            "XGBoost: only one year of annual data is observed, so "
+            "out-of-fold predictions are not possible; using in-sample "
+            "predictions for that year."
+        )
 
-    train_preds = _predict(X_train)
-    rmse = np.sqrt(np.mean((y_train - train_preds) ** 2))
-    logger.info(f"XGBoost: In-sample RMSE = {rmse:.6f}")
+    def _rmse(preds: npt.NDArray[np.float64]) -> float:
+        return float(np.sqrt(np.mean((targets - preds)[observed] ** 2)))
+
+    model.in_sample_rmse_ = _rmse(in_sample_preds)
+    model.out_of_fold_rmse_ = _rmse(xgb_annual_preds) if out_of_fold else float("nan")
+    model.out_of_fold_ = out_of_fold
+    logger.info(
+        f"XGBoost: out-of-fold (leave-one-year-out) RMSE = "
+        f"{model.out_of_fold_rmse_:.6f}; in-sample RMSE = {model.in_sample_rmse_:.6f}"
+    )
+
+    # Incomplete years at the start and end of the sample: predict from the
+    # average of the quarters available so far.
+    def _partial_year(rows: slice) -> npt.NDArray[np.float64] | None:
+        if len(range(*rows.indices(T))) == 0:
+            return None
+        X = np.empty((R, J + M))
+        for r in range(R):
+            X[r, :J] = [Z_panel[j][rows, r].mean() for j in range(J)]
+            X[r, J:] = macro[rows].mean(axis=0)
+        return _predict(model, X)
+
+    model.edge_year_preds_ = (
+        _partial_year(slice(0, q1_offset)),
+        _partial_year(slice(q1_offset + 4 * n_years, T)),
+    )
 
     return model, xgb_annual_preds
 
@@ -520,6 +573,10 @@ def fit_bridge_equation(
     use_almon: bool = True,
     ridge_alpha: float = 1.0,
     q1_offset: int = 0,
+    xgb_edge_preds: tuple[
+        npt.NDArray[np.float64] | None, npt.NDArray[np.float64] | None
+    ]
+    | None = None,
 ) -> tuple[npt.NDArray[np.float64], dict]:
     """Fit bridge equation and produce quarterly signal s_{t,r}.
 
@@ -546,6 +603,10 @@ def fit_bridge_equation(
             features and target so it does not depend on their units.
         q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
             covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
+        xgb_edge_preds: Optional pair of (R,) XGBoost annual predictions for
+            the incomplete years before the first Q1 and after the last Q4
+            (``None`` for either if absent). Without it, quarters in those
+            years use the prediction for the nearest complete year.
 
     Returns:
         Tuple of (quarterly_signal (T, R), bridge_info dict).
@@ -646,22 +707,36 @@ def fit_bridge_equation(
     delta = coefs[0]
     betas = coefs[1:]
 
-    logger.info(f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
+    logger.info(
+        f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f} "
+        f"(fitted to the XGBoost predictions it was given; these are "
+        f"out-of-fold when they come from train_xgboost_annual)"
+    )
     logger.debug(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
     logger.debug(f"Bridge: intercept = {intercept:.4f}")
 
     # --- Construct quarterly signal s_{t,r} ---
     quarterly_signal = np.zeros((T, R))
 
+    first_edge, last_edge = (
+        xgb_edge_preds if xgb_edge_preds is not None else (None, None)
+    )
     for r in range(R):
         Q_r = _build_quarterly_indicators_for_region(r)
         for t in range(T):
-            # Quarters outside the complete years (before the first Q1 or
-            # in an incomplete final year) use the nearest complete year.
-            a = min(max((t - q1_offset) // 4, 0), n_years - 1)
+            year = (t - q1_offset) // 4
             q = (t - q1_offset) % 4
+            # Quarters outside the complete years use the prediction made
+            # for their own incomplete year if supplied, otherwise that of
+            # the nearest complete year.
+            if year < 0 and first_edge is not None:
+                xgb_annual = first_edge[r]
+            elif year >= n_years and last_edge is not None:
+                xgb_annual = last_edge[r]
+            else:
+                xgb_annual = xgb_annual_preds[min(max(year, 0), n_years - 1), r]
 
-            xgb_component = (delta / 4.0) * xgb_annual_preds[a, r]
+            xgb_component = (delta / 4.0) * xgb_annual
             indicator_component = np.sum(betas * midas_weights[q] * Q_r[t])
             quarterly_signal[t, r] = (
                 (intercept / 4.0) + xgb_component + indicator_component
@@ -1173,9 +1248,11 @@ class Ambric:
         Pipeline:
             1. Extract factors from regional indicator panel.
             2. Train XGBoost on annually-aggregated raw indicators to predict
-               annual regional growth.
-            3. Fit MIDAS bridge equation to disaggregate XGBoost annual
-               predictions to quarterly frequency.
+               annual regional growth. Years with an outturn are predicted
+               leave-one-year-out.
+            3. Fit MIDAS bridge equation, on those out-of-fold predictions,
+               to disaggregate XGBoost annual predictions to quarterly
+               frequency.
             4. Build Bayesian state-space model with factors, macro, and
                bridge signal.
             5. Run variational inference.
@@ -1230,7 +1307,11 @@ class Ambric:
             use_almon=bridge_use_almon,
             ridge_alpha=bridge_ridge_alpha,
             q1_offset=self.q1_offset,
+            xgb_edge_preds=self.xgb_model.edge_year_preds_,
         )
+        self.bridge_info["xgb_out_of_fold"] = self.xgb_model.out_of_fold_
+        self.bridge_info["xgb_out_of_fold_rmse"] = self.xgb_model.out_of_fold_rmse_
+        self.bridge_info["xgb_in_sample_rmse"] = self.xgb_model.in_sample_rmse_
 
         # Step 4: Build PyMC model
         logger.info("\n[4/5] Building AMBRIC Bayesian model...")

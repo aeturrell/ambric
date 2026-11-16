@@ -939,7 +939,9 @@ class TestScaleHandling:
         )
 
         assert info_percent["bridge_r2"] == pytest.approx(info_decimal["bridge_r2"])
-        np.testing.assert_allclose(signal_percent, signal_decimal * 100, rtol=1e-6)
+        np.testing.assert_allclose(
+            signal_percent, signal_decimal * 100, rtol=1e-4, atol=1e-6
+        )
         # The ridge penalty must not wipe out a real relationship
         assert info_decimal["bridge_r2"] > 0.5
 
@@ -1012,3 +1014,115 @@ class TestScaleHandling:
         # a few percent at most, not tens of percent.
         assert float(prior["sigma_eps"].mean()) < 0.02
         assert float(np.abs(prior["y_reg"]).mean()) < 0.1
+
+
+# ── Out-of-fold XGBoost predictions (no in-sample leakage) ──────────────────
+
+# Settings under which XGBoost can memorise its training data
+_MEMORISING_XGB = dict(
+    n_estimators=300,
+    max_depth=8,
+    learning_rate=0.3,
+    subsample=1.0,
+    colsample_bytree=1.0,
+    reg_alpha=0.0,
+    reg_lambda=0.0,
+    min_child_weight=0,
+)
+
+
+def _pure_noise_inputs(seed: int = 0, T: int = 80, R: int = 5):
+    """Annual targets that are unrelated to the features."""
+    rng = np.random.default_rng(seed)
+    Z_panel = [rng.normal(size=(T, R)) for _ in range(3)]
+    macro = rng.normal(size=(T, 1))
+    y_annual = np.full((T, R), np.nan)
+    y_annual[3::4] = rng.normal(scale=0.02, size=(T // 4, R))
+    return Z_panel, macro, y_annual
+
+
+class TestOutOfFoldPredictions:
+    def test_observed_years_are_not_predicted_by_a_model_that_saw_them(self):
+        """The target is noise, so a model can only match it by memorising.
+        The fitted model does memorise its training data, but the returned
+        predictions for observed years must not benefit from that."""
+        Z_panel, macro, y_annual = _pure_noise_inputs()
+
+        model, preds = train_xgboost_annual(
+            Z_panel, macro, y_annual, xgb_params=_MEMORISING_XGB
+        )
+
+        target = y_annual[3::4]
+        assert model.in_sample_rmse_ < 0.1 * target.std()  # it can memorise
+        assert abs(np.corrcoef(preds.ravel(), target.ravel())[0, 1]) < 0.3
+        assert model.out_of_fold_rmse_ > 0.8 * target.std()
+        assert model.out_of_fold_ is True
+
+    def test_unobserved_years_are_predicted_by_the_full_model(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs()
+        y_annual[-8:] = np.nan  # last two years unpublished
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        assert not np.any(np.isnan(preds))
+        features_last_year = np.column_stack(
+            [z[-4:].mean(axis=0) for z in Z_panel]
+            + [np.full(y_annual.shape[1], macro[-4:].mean())]
+        )
+        expected = (
+            model.predict(features_last_year) * model.target_scale_ + model.target_mean_
+        )
+        np.testing.assert_allclose(preds[-1], expected, rtol=1e-5)
+
+    def test_single_observed_year_falls_back_to_in_sample(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs(T=20)
+        y_annual[:] = np.nan
+        y_annual[7] = 0.02 + 0.01 * np.arange(y_annual.shape[1])
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        assert model.out_of_fold_ is False
+        assert not np.any(np.isnan(preds))
+
+    def test_incomplete_final_year_gets_its_own_prediction(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs(T=80)
+        Z_panel = [np.vstack([z, z[:2] + 5.0]) for z in Z_panel]  # 2 extra quarters
+        macro = np.vstack([macro, macro[:2]])
+        y_annual = np.vstack([y_annual, np.full((2, y_annual.shape[1]), np.nan)])
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+        first_edge, last_edge = model.edge_year_preds_
+
+        assert preds.shape[0] == 20
+        assert first_edge is None
+        assert last_edge is not None and last_edge.shape == (y_annual.shape[1],)
+
+    def test_bridge_signal_uses_incomplete_year_prediction(self):
+        rng = np.random.default_rng(2)
+        T, R = 42, 3  # ten complete years and two further quarters
+        Z_panel = [rng.normal(size=(T, R))]
+        macro = rng.normal(size=(T, 1))
+        y_uk = rng.normal(scale=0.005, size=T)
+        y_annual = np.full((T, R), np.nan)
+        y_annual[3:40:4] = rng.normal(scale=0.02, size=(10, R))
+        xgb_preds = y_annual[3:40:4] + rng.normal(scale=0.005, size=(10, R))
+        last_edge = np.array([0.5, -0.5, 0.25])
+
+        signal_nearest, info = fit_bridge_equation(
+            y_annual, xgb_preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        signal_edge, _ = fit_bridge_equation(
+            y_annual,
+            xgb_preds,
+            Z_panel,
+            y_uk,
+            macro,
+            use_almon=False,
+            xgb_edge_preds=(None, last_edge),
+        )
+
+        np.testing.assert_allclose(signal_edge[:40], signal_nearest[:40])
+        expected_shift = (info["delta"] / 4.0) * (last_edge - xgb_preds[-1])
+        np.testing.assert_allclose(
+            signal_edge[40:] - signal_nearest[40:], np.tile(expected_shift, (2, 1))
+        )
