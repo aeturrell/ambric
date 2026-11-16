@@ -407,3 +407,37 @@ def test_fit_with_shuffled_year_end_only_data_starting_mid_year() -> None:
     ]
     assert len(nowcast_q) == len(amb.datetime_ts) * len(region_names)
     assert not nowcast_q["value"].isna().any()
+
+
+@patch("matplotlib.pyplot.show")
+def test_fit_reports_advi_convergence(mock_show) -> None:
+    """A deliberately short fit records its loss history and is flagged as
+    not converged."""
+    n_factors = 2
+    df = generate_realistic_simulated_data(T=60, R=4, J=2, n_factors=n_factors)
+    region_names = [x for x in df["region"].unique() if x != "uk"]
+    macro_names = [x for x in df["measure"].unique() if "macro" in x]
+    region_covariate_names = [
+        x for x in df["measure"].unique() if "regional_covar" in x
+    ]
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, format="{message}", level="INFO")
+
+    amb = Ambric(
+        df, macro_names, region_names, region_covariate_names, n_factors=n_factors
+    )
+    try:
+        amb.fit(n_model_fit_iterations=400, n_posterior_samples=50, advi_log_every=100)
+    finally:
+        logger.remove(sink_id)
+    amb.plot_advi_convergence()
+
+    assert amb.advi_loss_history is not None
+    assert len(amb.advi_loss_history) == 400
+    assert amb.advi_convergence is not None
+    assert amb.advi_convergence["converged"] is False
+    assert amb.advi_convergence["stopped_early"] is False
+    assert sum("ADVI" in m and "mean loss =" in m for m in messages) == 4
+    assert any("ADVI has NOT converged" in m for m in messages)
+    assert "ADVI converged: No" in repr(amb)
+    mock_show.assert_called()

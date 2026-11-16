@@ -49,8 +49,11 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 from xgboost import XGBRegressor
 
 from ambric.diagnostics import (
+    AdviProgressLogger,
     assemble_loadings_data,
+    assess_advi_convergence,
     economic_pulse_indicator,
+    plot_advi_convergence,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
     plot_loadings_aggregate,
@@ -957,6 +960,8 @@ class Ambric:
         self.bridge_info: dict | None = None
         self.xgb_model: XGBRegressor | None = None
         self.n_model_fit_iterations: int | None = None
+        self.advi_loss_history: npt.NDArray[np.float64] | None = None
+        self.advi_convergence: dict | None = None
         self.model_id: str = gen_unique_id()
         spine = build_datetime_spine(
             df,
@@ -990,6 +995,13 @@ class Ambric:
                 f"   Posterior samples: {self.trace.posterior.draw.shape[0]}\n"  # ty: ignore[unresolved-attribute]
                 f"   ADVI iterations: {self.n_model_fit_iterations}\n"
             )
+            if self.advi_convergence is not None:
+                status = "Yes" if self.advi_convergence["converged"] else "No"
+                if self.advi_convergence["stopped_early"]:
+                    status += (
+                        f" (stopped early at {self.advi_convergence['n_iterations']})"
+                    )
+                out_string += f"   ADVI converged: {status}\n"
         else:
             out_string += "Model fitted: No\n"
         out_string += "-------------------------------------"
@@ -1019,6 +1031,8 @@ class Ambric:
         xgb_params: dict | None = None,
         bridge_use_almon: bool = True,
         bridge_ridge_alpha: float = 1.0,
+        advi_log_every: int | None = None,
+        advi_convergence_tolerance: float = 1.0,
     ) -> "Ambric":
         """Fit the ambric model.
 
@@ -1038,6 +1052,12 @@ class Ambric:
             xgb_params: Optional XGBoost hyperparameters override.
             bridge_use_almon: Use Almon polynomial for MIDAS weights.
             bridge_ridge_alpha: Ridge regularisation for bridge equation.
+            advi_log_every: Iterations between log lines reporting the ADVI
+                loss. Defaults to one twentieth of the run.
+            advi_convergence_tolerance: Largest fall in mean loss, in nats,
+                between the last two 5% windows of the run that still counts
+                as converged. A warning is logged when the fit is still
+                improving by more than this.
 
         Returns:
             Self for method chaining.
@@ -1097,9 +1117,44 @@ class Ambric:
             inference = pm.fit(
                 n=n_model_fit_iterations,
                 method="advi",
-                callbacks=[pm.callbacks.CheckParametersConvergence()],
+                callbacks=[
+                    pm.callbacks.CheckParametersConvergence(),
+                    AdviProgressLogger(
+                        every=advi_log_every or max(n_model_fit_iterations // 20, 1),
+                        n_total=n_model_fit_iterations,
+                    ),
+                ],
             )
             self.trace: az.InferenceData = inference.sample(n_posterior_samples)
+
+        self.advi_loss_history = np.asarray(inference.hist, dtype=np.float64)
+        self.advi_convergence = assess_advi_convergence(
+            self.advi_loss_history, tolerance=advi_convergence_tolerance
+        )
+        # CheckParametersConvergence ends the run once parameters stop moving.
+        stopped_early = len(self.advi_loss_history) < n_model_fit_iterations
+        self.advi_convergence["stopped_early"] = stopped_early
+        if stopped_early:
+            self.advi_convergence["converged"] = True
+            logger.info(
+                f"ADVI stopped early after {len(self.advi_loss_history)} "
+                f"iterations: parameters had stopped changing."
+            )
+        elif self.advi_convergence["converged"]:
+            logger.info(
+                f"ADVI converged: mean loss {self.advi_convergence['final_loss']:.2f}, "
+                f"changed by {self.advi_convergence['improvement']:.2f} between "
+                f"the last two windows of {self.advi_convergence['window']} iterations."
+            )
+        else:
+            logger.warning(
+                f"ADVI has NOT converged after {n_model_fit_iterations} "
+                f"iterations: mean loss was still falling by "
+                f"{self.advi_convergence['improvement']:.2f} between the last two "
+                f"windows of {self.advi_convergence['window']} iterations "
+                f"(tolerance {advi_convergence_tolerance}). Estimates may be "
+                f"unreliable; increase n_model_fit_iterations."
+            )
 
         # For devs: can save model diagram using the below
         # (depends on graphviz)
@@ -1185,6 +1240,22 @@ class Ambric:
             axis=0,
         )
         return results_df
+
+    def plot_advi_convergence(self, path: Path | None = None) -> None:
+        """Plot the ADVI loss against iteration to check convergence.
+
+        Args:
+            path (Path | None): Directory to save the figure as SVG. When
+                ``None`` the figure is displayed interactively.
+
+        Raises:
+            ValueError: If model not fitted.
+        """
+        if self.advi_loss_history is None:
+            raise ValueError(
+                "ADVI loss history is not available. Fit the model before plotting."
+            )
+        plot_advi_convergence(self.advi_loss_history, path=path)
 
     def plot_national_quarterly_vs_implied(
         self, path: str | Path | None = None

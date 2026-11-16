@@ -9,6 +9,7 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import pytest
+from loguru import logger
 
 from ambric import (
     Ambric,
@@ -23,7 +24,9 @@ from ambric import (
     train_xgboost_annual,
 )
 from ambric.diagnostics import (
+    AdviProgressLogger,
     assemble_loadings_data,
+    assess_advi_convergence,
     recession_indicator,
     rmse_national_quarterly,
     rmse_regions_annual,
@@ -823,3 +826,53 @@ class TestEarlyAnnualObservations:
 
         assert np.all(np.isnan(y_annual_est[:6]))
         assert not np.any(np.isnan(y_annual_est[6:]))
+
+
+# ── ADVI convergence reporting ──────────────────────────────────────────────
+
+
+class TestAdviConvergence:
+    def test_falling_loss_is_not_converged(self):
+        losses = np.linspace(1000.0, 0.0, 2000)
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is False
+        assert result["improvement"] == pytest.approx(50.0, rel=0.01)
+        assert result["window"] == 100
+        assert result["n_iterations"] == 2000
+
+    def test_flat_noisy_loss_is_converged(self):
+        rng = np.random.default_rng(0)
+        losses = np.concatenate(
+            [np.linspace(1000.0, 5.0, 500), 5.0 + rng.normal(scale=2.0, size=20000)]
+        )
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is True
+        assert result["final_loss"] == pytest.approx(5.0, abs=0.2)
+
+    def test_non_finite_loss_is_not_converged(self):
+        losses = np.full(1000, np.inf)
+
+        result = assess_advi_convergence(losses)
+
+        assert result["converged"] is False
+
+    def test_progress_logger_reports_every_n_iterations(self):
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, format="{message}", level="INFO")
+        progress = AdviProgressLogger(every=100, n_total=300)
+        losses = np.linspace(300.0, 0.0, 300)
+
+        try:
+            for i in range(1, 301):
+                progress(None, losses[:i], i)
+        finally:
+            logger.remove(sink_id)
+
+        reports = [m for m in messages if "ADVI" in m]
+        assert len(reports) == 3
+        assert "100/300" in reports[0]
+        assert "improved by 100.33" in reports[1]

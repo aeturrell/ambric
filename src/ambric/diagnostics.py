@@ -1416,6 +1416,132 @@ def oos_q_on_4q_performance_table(
     return summary_df
 
 
+class AdviProgressLogger:
+    """Callback for ``pm.fit`` that logs how the ADVI loss is improving.
+
+    Every ``every`` iterations it logs the mean loss (negative ELBO) over
+    the most recent ``every`` iterations and the change since the previous
+    report. A loss that is still falling steadily at the final report means
+    the fit has not converged.
+    """
+
+    def __init__(self, every: int = 10000, n_total: int | None = None) -> None:
+        """Set up the logger.
+
+        Args:
+            every (int): Number of iterations between log lines.
+            n_total (int | None): Planned number of iterations, used only to
+                show progress as ``i/n_total``.
+        """
+        if every < 1:
+            raise ValueError(f"every must be at least 1, got {every}.")
+        self.every = every
+        self.n_total = n_total
+        self.previous_mean: float | None = None
+
+    def __call__(self, approx, losses, i: int) -> None:  # noqa: ANN001
+        """Log progress if ``i`` is a multiple of ``every``."""
+        if losses is None or i % self.every != 0 or i == 0:
+            return
+        window_mean = float(np.mean(losses[-self.every :]))
+        progress = f"{i}/{self.n_total}" if self.n_total is not None else f"{i}"
+        if self.previous_mean is None:
+            logger.info(f"   ADVI {progress}: mean loss = {window_mean:.2f}")
+        else:
+            improvement = self.previous_mean - window_mean
+            logger.info(
+                f"   ADVI {progress}: mean loss = {window_mean:.2f} "
+                f"(improved by {improvement:.2f} over last {self.every} iterations)"
+            )
+        self.previous_mean = window_mean
+
+
+def assess_advi_convergence(
+    loss_history: npt.NDArray[np.float64],
+    tolerance: float = 1.0,
+    window_fraction: float = 0.05,
+) -> dict:
+    """Judge whether an ADVI fit had stopped improving by its end.
+
+    Compares the mean loss (negative ELBO, in nats) over the final
+    ``window_fraction`` of iterations with the mean over the window of the
+    same length just before it. The fit is treated as converged when the
+    loss fell by no more than ``tolerance`` nats between the two windows.
+
+    Args:
+        loss_history (npt.NDArray[np.float64]): Loss at each iteration.
+        tolerance (float): Largest fall in mean loss, in nats, between the
+            two final windows that still counts as converged.
+        window_fraction (float): Fraction of iterations in each window.
+
+    Returns:
+        dict: With keys ``converged`` (bool), ``final_loss`` (mean loss in
+            the final window), ``improvement`` (fall in mean loss between
+            the two windows; positive means still improving),
+            ``window`` (iterations per window) and ``n_iterations``.
+    """
+    losses = np.asarray(loss_history, dtype=np.float64)
+    n = len(losses)
+    window = max(int(n * window_fraction), 1)
+    if n < 2 * window or not np.all(np.isfinite(losses[-2 * window :])):
+        return {
+            "converged": False,
+            "final_loss": float(losses[-1]) if n > 0 else float("nan"),
+            "improvement": float("nan"),
+            "window": window,
+            "n_iterations": n,
+        }
+    final_loss = float(losses[-window:].mean())
+    improvement = float(losses[-2 * window : -window].mean()) - final_loss
+    return {
+        "converged": bool(improvement <= tolerance),
+        "final_loss": final_loss,
+        "improvement": improvement,
+        "window": window,
+        "n_iterations": n,
+    }
+
+
+def plot_advi_convergence(
+    loss_history: npt.NDArray[np.float64],
+    path: Path | None = None,
+    smoothing_window: int | None = None,
+) -> None:
+    """Plot the ADVI loss against iteration.
+
+    Shows a rolling mean of the loss (negative ELBO). The first tenth of
+    the run is left out so that the large early losses do not hide the
+    behaviour near the end. A curve that is still sloping down at the right
+    edge means more iterations are needed.
+
+    Args:
+        loss_history (npt.NDArray[np.float64]): Loss at each iteration.
+        path (Path | None): Directory to save the figure as SVG. When
+            ``None`` the figure is displayed interactively.
+        smoothing_window (int | None): Iterations in the rolling mean.
+            Defaults to 1% of the run.
+    """
+    losses = pd.Series(np.asarray(loss_history, dtype=np.float64))
+    n = len(losses)
+    if smoothing_window is None:
+        smoothing_window = max(n // 100, 1)
+    smoothed = losses.rolling(smoothing_window, min_periods=1).mean()
+    start = n // 10
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(smoothed.index[start:], smoothed.iloc[start:], color=colour_wheel[0], lw=2)
+    ax.set_xlabel("ADVI iteration")
+    ax.set_title(
+        f"ADVI loss (negative ELBO), rolling mean over {smoothing_window} iterations",
+        loc="left",
+    )
+    plt.tight_layout()
+    if path is not None:
+        plt.savefig(path / "AMBRIC_advi_convergence.svg")
+    else:
+        plt.show()
+    plt.close()
+
+
 def plot_seasonally_adjusted_q_on_q_growth(
     df_sa_trend_orig: pd.DataFrame, path: Path | None
 ) -> None:
