@@ -60,6 +60,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel.force-include]
 "src/ambric/plot_style.txt" = "ambric/plot_style.txt"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: full-length model fits that take several minutes (run with -m slow)",
+]
+addopts = "-m 'not slow'"
+
 [tool.pydoclint]
 style = 'google'
 exclude = ["noxfile.py", "tests/", "docs/"]

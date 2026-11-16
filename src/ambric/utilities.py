@@ -11,6 +11,11 @@ from loguru import logger
 # Inter-temporal weights for annual-to-quarterly aggregation
 OMEGA = np.array([1 / 4, 1 / 2, 3 / 4, 1, 3 / 4, 1 / 2, 1 / 4])
 
+# Noise scales of the simulated data generating process (decimal growth rates)
+SIM_SIGMA_EPS = 0.002  # regional quarterly innovation
+SIM_SIGMA_UK = 0.0005  # national aggregation noise
+SIM_SIGMA_ANNUAL = 0.005  # annual regional measurement noise
+
 
 # =============================================================================
 # Functions
@@ -22,7 +27,10 @@ def generate_realistic_simulated_data(
     n_factors: int = 2,
     n_macro: int = 2,
     lag_qtrs: int = 6,
-) -> pd.DataFrame:
+    seed: int = 34,
+    w_true: npt.NDArray[np.float64] | None = None,
+    return_truth: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """Generate simulated mixed-frequency regional data in long format.
 
     Produces a ``pd.DataFrame`` resembling real-world data suitable for
@@ -37,10 +45,21 @@ def generate_realistic_simulated_data(
         n_factors (int): Number of latent factors in the DGP.
         n_macro (int): Number of macro indicator series.
         lag_qtrs (int): Publication lag in quarters for annual regional data.
+        seed (int): Random seed for reproducibility.
+        w_true (npt.NDArray[np.float64] | None): Regional weights, shape (R,),
+            used to form national growth. Defaults to equal weights.
+        return_truth (bool): If True, also return the quantities the model
+            is trying to recover.
 
     Returns:
-        pd.DataFrame: Long-format frame with columns
-            ``datetime``, ``measure``, ``region``, ``value``.
+        pd.DataFrame | tuple[pd.DataFrame, dict]: Long-format frame with
+            columns ``datetime``, ``measure``, ``region``, ``value``. With
+            ``return_truth=True``, a tuple of that frame and a dict with keys
+            ``datetime`` (T,), ``region_names``, ``y_reg_true`` (T, R) true
+            quarterly regional growth, ``y_annual_no_lag`` (T, R) annual
+            regional growth including the unpublished recent values,
+            ``w_true`` (R,), and the noise scales ``sigma_eps``,
+            ``sigma_uk``, ``sigma_annual``.
     """
     # Simulate data
 
@@ -56,7 +75,8 @@ def generate_realistic_simulated_data(
             n_factors=n_factors,
             n_macro=n_macro,
             annnual_regional_lag_qrtrs=lag_qtrs,
-            seed=34,
+            seed=seed,
+            w_true=w_true,
         )
     )
 
@@ -108,6 +128,18 @@ def generate_realistic_simulated_data(
     df_as_if_real = pd.concat(
         [df_uk_q, df_macro, df_Z_panel, df_regional_annual], axis=0
     )
+    if return_truth:
+        truth = {
+            "datetime": quarters,
+            "region_names": ["region_" + str(r).zfill(2) for r in range(R)],
+            "y_reg_true": y_reg_true,
+            "y_annual_no_lag": y_annual_no_lag,
+            "w_true": np.ones(R) / R if w_true is None else np.asarray(w_true),
+            "sigma_eps": SIM_SIGMA_EPS,
+            "sigma_uk": SIM_SIGMA_UK,
+            "sigma_annual": SIM_SIGMA_ANNUAL,
+        }
+        return df_as_if_real, truth
     return df_as_if_real
 
 
@@ -402,6 +434,7 @@ def simulate_data(
     n_factors: int = 2,
     n_macro: int = 2,
     seed: int = 42,
+    w_true: npt.NDArray[np.float64] | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
@@ -418,6 +451,11 @@ def simulate_data(
         n_factors (int): Number of latent factors.
         n_macro (int): Number of macro indicator series.
         seed (int): Random seed for reproducibility.
+        w_true (npt.NDArray[np.float64] | None): Regional weights, shape (R,),
+            used to form national growth. Defaults to equal weights.
+
+    Raises:
+        ValueError: If ``w_true`` does not have shape (R,).
 
     Returns:
         tuple: ``(y_uk, y_annual, y_reg_true, Z_panel, macro)`` — national
@@ -449,7 +487,7 @@ def simulate_data(
     # phi_r=0.7 gives strongly persistent quarterly regional growth, matching
     # the smooth dynamics seen in real regional GVA / GHDI series.
     phi_r = 0.7 * np.ones(R)
-    sigma_eps = 0.002
+    sigma_eps = SIM_SIGMA_EPS
     mu_exog = f_true @ Lambda_true.T + macro @ Gamma_true.T
     y_reg_true = np.zeros((T, R))
     y_reg_true[0] = mu_exog[0] + sigma_eps * np.random.randn(R)
@@ -461,8 +499,12 @@ def simulate_data(
         )
 
     # UK aggregate
-    w_true = np.ones(R) / R
-    y_uk = y_reg_true @ w_true + 0.0005 * np.random.randn(T)
+    if w_true is None:
+        w_true = np.ones(R) / R
+    w_true = np.asarray(w_true, dtype=np.float64)
+    if w_true.shape != (R,):
+        raise ValueError(f"w_true must have shape ({R},), got {w_true.shape}.")
+    y_uk = y_reg_true @ w_true + SIM_SIGMA_UK * np.random.randn(T)
 
     # Regional indicator panels: strong factor loading + low noise so the
     # extracted factors are a clean view of the latent f_true.
@@ -478,7 +520,7 @@ def simulate_data(
             for r in range(R):
                 y_annual[t, r] = (
                     sum(OMEGA[j] * y_reg_true[t - j, r] for j in range(7))
-                    + 0.005 * np.random.randn()
+                    + SIM_SIGMA_ANNUAL * np.random.randn()
                 )
 
     return y_uk, y_annual, y_reg_true, Z_panel, macro
@@ -492,6 +534,7 @@ def simulate_real_time_data(
     n_macro: int = 2,
     annnual_regional_lag_qrtrs: int = 6,
     seed: int = 42,
+    w_true: npt.NDArray[np.float64] | None = None,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
@@ -514,6 +557,8 @@ def simulate_real_time_data(
         n_macro (int): Number of macro indicator series.
         annnual_regional_lag_qrtrs (int): Quarters of annual data to mask.
         seed (int): Random seed for reproducibility.
+        w_true (npt.NDArray[np.float64] | None): Regional weights, shape (R,),
+            used to form national growth. Defaults to equal weights.
 
     Returns:
         tuple: ``(y_uk, y_annual, y_reg_true, Z_panel, macro, y_annual_no_lags)``
@@ -521,7 +566,7 @@ def simulate_real_time_data(
             annual data before the lag was applied.
     """
     y_uk, y_annual, y_reg_true, Z_panel, macro = simulate_data(
-        T=T, R=R, J=J, n_factors=n_factors, n_macro=n_macro, seed=seed
+        T=T, R=R, J=J, n_factors=n_factors, n_macro=n_macro, seed=seed, w_true=w_true
     )
     # Now knock out any annual regional data that would not have been available in real-time, starting from the end
     y_annual_no_lags = y_annual.copy()
