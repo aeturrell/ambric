@@ -43,9 +43,15 @@ macro_names = [x for x in df["measure"].unique() if "macro" in x]
 region_covariate_names = [x for x in df["measure"].unique() if "regional_covar" in x]
 ```
 
-Gotcha: you must ensure that the annual regional data have datetime index entries for **all** quarters up to the last published annual macro value. For non-year end quarters, the values should be nan.
+Growth rates must be decimals (`0.005` for 0.5%). Rows can be in any order. The quarterly growth series for the aggregate region must be complete, with no missing quarters, and so must the macro series. Regional data need rows only where a value exists: annual regional growth is given at year-end quarters, and other quarters can be left out or set to nan.
 
 In a typical use case, you will have non-nan quarters of quarterly growth at the aggregate region (eg the UK) for which the regional data are nan. Those nans in the time period between is what we are nowcasting.
+
+If you know each region's share of the national total (for example its share of output), pass it as `region_weights`, a dictionary keyed by region name. It centres the prior on the weights that turn regional growth into national growth. Without it, AMBRIC estimates the shares from the growth data, which is much less precise. The simulated regions are equally sized, so here we say so:
+
+```{python}
+region_weights = {region: 1.0 for region in region_names}
+```
 
 Okay, we're ready to build a **AMBRIC** model!
 
@@ -56,6 +62,7 @@ amb = Ambric(
     region_names,
     region_covariate_names,
     n_factors=n_factors,
+    region_weights=region_weights,
 )
 amb
 ```
@@ -68,7 +75,13 @@ n_posterior_samples = 3000
 amb.fit(n_iterations, n_posterior_samples)
 ```
 
-That's it! It's done. Now let's look at some results.
+That's it! It's done. While fitting, the log reports how the ADVI loss is improving, and warns at the end if it was still falling, which means more iterations are needed. You can also look at the loss path directly:
+
+```{python}
+amb.plot_advi_convergence()
+```
+
+Now let's look at some results.
 
 First, our regional estimates of quarterly growth must be consistent with the observed national growth. We can check the implied vs the true growth at the national level.
 

@@ -40,10 +40,10 @@ import pymc as pm
 import pytensor.tensor as pt
 from loguru import logger
 from scipy.optimize import minimize
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.decomposition import FactorAnalysis
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
-from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import BayesianRidge, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
@@ -957,7 +957,12 @@ def build_ambric_model(
 
         # --- Regional weights for UK aggregation ---
         # Positive and summing to one, centred on the prior shares.
-        w = pm.Dirichlet("w", a=weight_prior_concentration * weight_prior_mean)
+        # Held as data rather than a constant: with a constant, equal
+        # shares trip a PyTensor graph rewrite that then logs an error.
+        w_prior_alpha = pm.Data(
+            "w_prior_alpha", weight_prior_concentration * weight_prior_mean
+        )
+        w = pm.Dirichlet("w", a=w_prior_alpha, shape=R)
 
         # --- Degrees of freedom ---
         nu_uk = pm.Gamma("nu_uk", alpha=6, beta=1)
@@ -1113,10 +1118,12 @@ class Ambric:
                 Partial coverage is fully supported: you may supply rows for
                 only one or two regions, and only for some quarters. Missing
                 region/quarter combinations (no row, or NaN value) are
-                automatically masked out of the likelihood — uncovered
-                regions and quarters contribute nothing to this term, and
-                the model fits normally. Defaults to ``None`` (no q-on-q
-                observations — backwards compatible).
+                estimated as usual. Where a value is supplied, the model's
+                latent quarterly growth for that region and quarter is
+                fixed to it (a hard clamp, not a noisy observation), and
+                it then informs neighbouring quarters and regions through
+                the model's dynamics and constraints. Defaults to ``None``
+                (no q-on-q observations — backwards compatible).
             region_weights: Optional weight of each region in the national
                 aggregate, keyed by region name, e.g. each region's share
                 of national output. They need not sum to one. They set the

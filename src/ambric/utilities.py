@@ -373,10 +373,10 @@ def prep_data_for_model_run(
 
             Partial coverage is fully supported: rows may be supplied for only a
             subset of regions and a subset of quarters. After pivoting, absent
-            region/quarter pairs become NaN and are automatically masked out of
-            the downstream likelihood, so uncovered regions and quarters
-            contribute nothing. Defaults to ``None`` (no q-on-q observations —
-            backwards compatible).
+            region/quarter pairs become NaN and are estimated by the model as
+            usual; supplied values fix the model's latent quarterly growth
+            for that region and quarter (a hard clamp). Defaults to ``None``
+            (no q-on-q observations — backwards compatible).
 
     Every returned array is aligned to one sorted quarterly spine: the
     quarters at which ``aggregate_measure`` is present for
