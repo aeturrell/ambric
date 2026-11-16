@@ -162,6 +162,10 @@ def trace_to_series(
     # 5. Calculate mean for each region (no bands as ADVI)
     y_a_r_est_point = y_a_r_dist.mean(dim=("chain", "draw")).to_numpy()
 
+    # The first rows lack a full window of lags, so their sums are partial
+    # and not estimates of annual growth.
+    y_a_r_est_point[: len(OMEGA) - 1] = np.nan
+
     return (
         y_q_uk_est_point,
         y_q_r_est_point,
@@ -325,7 +329,7 @@ def plot_regional_annual_estimate(
         sharey=True,
     )
     axes = axes.flatten()
-    y_lim = np.max(y_annual_est) * 1.2
+    y_lim = np.nanmax(y_annual_est) * 1.2
     y_lim = float(f"{float(f'{y_lim * 1.3:.{2}g}'):g}")
     for i, r in enumerate(range(R)):
         axes[i].axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
@@ -417,7 +421,7 @@ def plot_single_region_annual_estimate(
         xycoords=("data", "axes fraction"),
     )
     fig.autofmt_xdate()
-    min_point_implied = np.argmin(y_annual_est[:, region_idx])
+    min_point_implied = np.nanargmin(y_annual_est[:, region_idx])
     max_point_true = np.argmax(y_annual_true[:, region_idx])
     ax.annotate(
         "Estimated",

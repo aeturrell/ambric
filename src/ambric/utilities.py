@@ -121,6 +121,82 @@ def gen_unique_id() -> str:
     return run_str
 
 
+def build_datetime_spine(
+    df: pd.DataFrame,
+    aggregate_measure: str = "gva_q_on_q",
+    aggregation_region: str = "uk",
+) -> pd.DatetimeIndex:
+    """Build the sorted quarterly datetime spine that every input is aligned to.
+
+    The spine is the set of datetimes at which the aggregate measure is
+    present for the aggregation region. It must be a gap-free run of
+    quarters.
+
+    Args:
+        df (pd.DataFrame): Long format dataframe with all data in.
+        aggregate_measure (str, optional): UK-wide measure in q-on-q growth rate. Defaults to "gva_q_on_q".
+        aggregation_region (str, optional): Highest level geography. Defaults to "uk".
+
+    Raises:
+        ValueError: If there are no rows for the aggregate measure, or if
+            the quarters are not contiguous.
+
+    Returns:
+        pd.DatetimeIndex: Sorted, unique, contiguous quarterly datetimes.
+    """
+    datetimes = pd.to_datetime(
+        df.loc[
+            (df["measure"] == aggregate_measure) & (df["region"] == aggregation_region),
+            "datetime",
+        ]
+    )
+    spine = pd.DatetimeIndex(sorted(datetimes.unique()), name="datetime")
+    if len(spine) == 0:
+        raise ValueError(
+            f"No rows found for measure '{aggregate_measure}' in region "
+            f"'{aggregation_region}'."
+        )
+    quarter_numbers = spine.year * 4 + spine.quarter
+    gaps = np.flatnonzero(np.diff(quarter_numbers) != 1)
+    if len(gaps) > 0:
+        first_gap = gaps[0]
+        raise ValueError(
+            f"Measure '{aggregate_measure}' has missing quarters: gap between "
+            f"{spine[first_gap].strftime('%Y-%m-%d')} and "
+            f"{spine[first_gap + 1].strftime('%Y-%m-%d')}. A gap-free "
+            f"quarterly series is required."
+        )
+    return spine
+
+
+def first_q1_offset(spine: pd.DatetimeIndex) -> int:
+    """Row index of the first calendar Q1 in a contiguous quarterly spine.
+
+    Args:
+        spine (pd.DatetimeIndex): Contiguous quarterly datetimes.
+
+    Returns:
+        int: Offset in ``0..3`` such that row ``offset + 4 * a + q`` is
+            quarter ``q`` (0 = Q1) of the ``a``-th complete calendar year.
+    """
+    return int((4 - (spine[0].quarter - 1)) % 4)
+
+
+def _check_no_duplicates(df: pd.DataFrame) -> None:
+    """Raise if any (datetime, measure, region) combination is repeated."""
+    keys = ["datetime", "measure", "region"]
+    dupes = df.loc[df.duplicated(subset=keys, keep=False), keys]
+    if not dupes.empty:
+        example = dupes.iloc[0]
+        raise ValueError(
+            f"Duplicate rows found for {len(dupes.drop_duplicates())} "
+            f"(datetime, measure, region) combinations, e.g. "
+            f"({pd.Timestamp(example['datetime']).strftime('%Y-%m-%d')}, "
+            f"{example['measure']}, {example['region']}). Each combination "
+            f"must appear at most once."
+        )
+
+
 def prep_data_for_model_run(
     df: pd.DataFrame,
     macro_names: list[str],
@@ -169,6 +245,19 @@ def prep_data_for_model_run(
             contribute nothing. Defaults to ``None`` (no q-on-q observations —
             backwards compatible).
 
+    Every returned array is aligned to one sorted quarterly spine: the
+    quarters at which ``aggregate_measure`` is present for
+    ``aggregation_region``. The row order of ``df`` does not matter, macro
+    columns follow ``macro_names``, and regional columns follow
+    ``region_names``. Regional measures need rows only where a value exists;
+    other quarters become NaN.
+
+    Raises:
+        KeyError: If a required measure or region is absent from ``df``.
+        ValueError: If a (datetime, measure, region) combination is repeated,
+            if ``aggregate_measure`` has missing quarters or values, or if a
+            macro series is incomplete over the spine.
+
     Returns:
         tuple: ``(y_uk_extracted, y_a_r_extracted, Z_panel_extract, macro_extracted, lag_qtrs, y_qoq_r_extracted)``.
         ``y_qoq_r_extracted`` is a ``(T, R)`` array aligned to ``region_names`` with NaN in
@@ -193,38 +282,69 @@ def prep_data_for_model_run(
     if missing_regions:
         raise KeyError(f"Regions not found in the data: {missing_regions}")
 
-    y_uk_extracted: npt.NDArray[np.float64] = df.loc[
-        ((df["measure"] == aggregate_measure) & (df["region"] == aggregation_region)),
-        "value",
-    ].values
-    macro_extracted: npt.NDArray[np.float64] = (
-        df.loc[
-            ((df["measure"].isin(macro_names)) & (df["region"] == aggregation_region)),
-            :,
-        ]
-        .pivot(index="datetime", columns="measure", values="value")
-        .values
+    # Only the measures and regions the model uses are considered from here on.
+    df = df.loc[
+        df["measure"].isin(required_measures)
+        & df["region"].isin(region_names + [aggregation_region]),
+        ["datetime", "measure", "region", "value"],
+    ].copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    _check_no_duplicates(df)
+
+    # Every array is aligned to one sorted quarterly spine, so results do
+    # not depend on the row order of the incoming dataframe.
+    spine = build_datetime_spine(
+        df, aggregate_measure=aggregate_measure, aggregation_region=aggregation_region
     )
-    y_a_r_extracted: npt.NDArray[np.float64] = (
-        df.loc[
-            (df["measure"] == region_measure) & (df["region"].isin(region_names)),
-            :,
-        ]
-        .pivot(index="datetime", columns="region", values="value")
-        .reindex(columns=region_names)
-        .values
-    )
-    # If len(y_a_r_extracted) < len(y_uk_extracted), extend with nans
-    # so the model can fill in the (given) nan gaps
-    missing_annual = len(y_uk_extracted) - len(y_a_r_extracted)
-    if missing_annual > 0:
-        nan_array_to_concat = np.full(
-            (missing_annual, y_a_r_extracted.shape[1]), np.nan
-        )
-        y_a_r_extracted = np.concatenate([y_a_r_extracted, nan_array_to_concat])
+    n_outside_spine = int((~df["datetime"].isin(spine)).sum())
+    if n_outside_spine > 0:
         logger.info(
-            f"Adding {str(missing_annual)} extra rows of nans to q-on-4q regional data to match number of rows in quarterly data; these extra rows will be estimated by the model."
+            f"Dropping {n_outside_spine} rows dated outside the range of "
+            f"'{aggregate_measure}' ({spine[0].strftime('%Y-%b')} to "
+            f"{spine[-1].strftime('%Y-%b')})."
         )
+
+    def _regional_panel(measure: str) -> npt.NDArray[np.float64]:
+        """(T, R) array for a regional measure, aligned to spine and region_names."""
+        return (
+            df.loc[(df["measure"] == measure) & (df["region"].isin(region_names)), :]
+            .pivot(index="datetime", columns="region", values="value")
+            .reindex(index=spine, columns=region_names)
+            .to_numpy(dtype=np.float64)
+        )
+
+    df_aggregate = df.loc[df["region"] == aggregation_region, :]
+    y_uk_extracted: npt.NDArray[np.float64] = (
+        df_aggregate.loc[df_aggregate["measure"] == aggregate_measure, :]
+        .set_index("datetime")["value"]
+        .reindex(spine)
+        .to_numpy(dtype=np.float64)
+    )
+    if np.any(np.isnan(y_uk_extracted)):
+        raise ValueError(
+            f"Measure '{aggregate_measure}' contains "
+            f"{int(np.isnan(y_uk_extracted).sum())} missing values; a complete "
+            f"quarterly series is required."
+        )
+    # Columns follow macro_names (pivot alone would sort them alphabetically).
+    macro_frame = (
+        df_aggregate.loc[df_aggregate["measure"].isin(macro_names), :]
+        .pivot(index="datetime", columns="measure", values="value")
+        .reindex(index=spine, columns=macro_names)
+    )
+    macro_extracted: npt.NDArray[np.float64] = macro_frame.to_numpy(dtype=np.float64)
+    macro_with_nans = [name for name in macro_names if macro_frame[name].isna().any()]
+    if macro_with_nans:
+        raise ValueError(
+            f"Macro series with missing values over "
+            f"{spine[0].strftime('%Y-%b')} to {spine[-1].strftime('%Y-%b')}: "
+            f"{macro_with_nans}. Macro series must be complete over the "
+            f"range of '{aggregate_measure}'."
+        )
+
+    # Quarters with no row (e.g. non-year-end quarters, or the unpublished
+    # recent period) become NaN and are estimated by the model.
+    y_a_r_extracted = _regional_panel(region_measure)
 
     # Compute lag_qtrs from per-region trailing NaN counts.
     # One region may have data up to the latest period while most have a
@@ -246,20 +366,9 @@ def prep_data_for_model_run(
         f"using modal lag_qtrs={lag_qtrs}"
     )
 
-    all_datetimes = sorted(df["datetime"].unique())
-
     y_qoq_r_extracted: npt.NDArray[np.float64] | None
     if region_q_on_q_measure is not None:
-        y_qoq_r_extracted = (
-            df.loc[
-                (df["measure"] == region_q_on_q_measure)
-                & (df["region"].isin(region_names)),
-                :,
-            ]
-            .pivot(index="datetime", columns="region", values="value")
-            .reindex(index=all_datetimes, columns=region_names)
-            .values
-        )
+        y_qoq_r_extracted = _regional_panel(region_q_on_q_measure)
         n_obs = int(np.sum(~np.isnan(y_qoq_r_extracted)))
         logger.info(
             f"Regional q-on-q measure '{region_q_on_q_measure}': "
@@ -269,14 +378,7 @@ def prep_data_for_model_run(
         y_qoq_r_extracted = None
 
     Z_panel_extract: list[npt.NDArray[np.float64]] = [
-        df.loc[
-            ((df["region"].isin(region_names)) & (df["measure"] == curr_measure)),
-            :,
-        ]
-        .pivot(index="datetime", columns="region", values="value")
-        .reindex(index=all_datetimes, columns=region_names)
-        .values
-        for curr_measure in region_covariate_names
+        _regional_panel(curr_measure) for curr_measure in region_covariate_names
     ]
     logger.info("Input lengths after data prep:")
     logger.info(f"  Quarterly {aggregate_measure}: T_max = {len(y_uk_extracted)}")

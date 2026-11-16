@@ -375,3 +375,35 @@ def test_pseudo_realtime_with_early_nan_covariates(mock_show) -> None:
     plot_out_of_sample_nowcasts(df_results, region_measure=region_measure)
     oos_q_on_4q_performance_table(df_results, region_measure)
     mock_show.assert_called()
+
+
+def test_fit_with_shuffled_year_end_only_data_starting_mid_year() -> None:
+    """The model fits when the input is shuffled, the sample starts in Q3,
+    and regional data have rows only where a value is published."""
+    n_factors = 2
+    df = generate_realistic_simulated_data(T=60, R=4, J=2, n_factors=n_factors)
+    region_names = [x for x in df["region"].unique() if x != "uk"]
+    macro_names = [x for x in df["measure"].unique() if "macro" in x]
+    region_covariate_names = [
+        x for x in df["measure"].unique() if "regional_covar" in x
+    ]
+    dates = sorted(df["datetime"].unique())
+    is_padding = (df["measure"] == "gva_q_on_4q") & df["value"].isna()
+    df = df.loc[(df["datetime"] >= dates[2]) & ~is_padding]
+    df = df.sample(frac=1, random_state=0)
+
+    amb = Ambric(
+        df, macro_names, region_names, region_covariate_names, n_factors=n_factors
+    )
+    amb.fit(n_model_fit_iterations=200, n_posterior_samples=50)
+    results = amb.populate_results()
+
+    assert amb.q1_offset == 2
+    assert amb.bridge_signal is not None
+    assert amb.bridge_signal.shape == (len(amb.datetime_ts), len(region_names))
+    assert not np.any(np.isnan(amb.bridge_signal))
+    nowcast_q = results.loc[
+        (results["type"] == "nowcast") & (results["measure"] == "q_on_q")
+    ]
+    assert len(nowcast_q) == len(amb.datetime_ts) * len(region_names)
+    assert not nowcast_q["value"].isna().any()

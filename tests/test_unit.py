@@ -5,6 +5,7 @@ No model fitting is performed — only the deterministic helpers and
 validation paths are exercised.
 """
 
+import arviz as az
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,7 +15,9 @@ from ambric import (
     _aggregate_quarterly_to_annual,
     _almon_weights,
     _apply_midas_weights,
+    build_ambric_model,
     extract_factors_from_panel,
+    fit_bridge_equation,
     impute_panel,
     quarter_differences,
     train_xgboost_annual,
@@ -25,8 +28,13 @@ from ambric.diagnostics import (
     rmse_national_quarterly,
     rmse_regions_annual,
     rmse_regions_quarterly,
+    trace_to_series,
 )
-from ambric.utilities import generate_realistic_simulated_data, prep_data_for_model_run
+from ambric.utilities import (
+    first_q1_offset,
+    generate_realistic_simulated_data,
+    prep_data_for_model_run,
+)
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -570,3 +578,248 @@ class TestAssembleLoadingsDataScaling:
         assert np.isclose(row["mean"].iloc[0], -3.0)
 
         assert df["scaled"].all()
+
+
+# ── Data alignment (date spine, ordering, calendar) ─────────────────────────
+
+
+def _names(df: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
+    """(region_names, macro_names, region_covariate_names) for a simulated df."""
+    region_names = sorted([x for x in df["region"].unique() if x != "uk"])
+    macro_names = sorted([x for x in df["measure"].unique() if "macro" in x])
+    covariate_names = sorted(
+        [x for x in df["measure"].unique() if "regional_covar" in x]
+    )
+    return region_names, macro_names, covariate_names
+
+
+class TestDataAlignment:
+    def test_row_order_does_not_change_arrays(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shuffled = simulated_df.sample(frac=1, random_state=0)
+
+        expected = prep_data_for_model_run(
+            simulated_df, macro_names, region_names, covariate_names
+        )
+        result = prep_data_for_model_run(
+            shuffled, macro_names, region_names, covariate_names
+        )
+
+        np.testing.assert_array_equal(result[0], expected[0])  # y_uk
+        np.testing.assert_array_equal(result[1], expected[1])  # y_annual
+        np.testing.assert_array_equal(result[3], expected[3])  # macro
+        for z_result, z_expected in zip(result[2], expected[2], strict=True):
+            np.testing.assert_array_equal(z_result, z_expected)
+
+    def test_shuffled_rows_give_sorted_datetime_ts(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shuffled = simulated_df.sample(frac=1, random_state=0)
+
+        amb = Ambric(shuffled, macro_names, region_names, covariate_names)
+
+        assert amb.datetime_ts.is_monotonic_increasing
+        assert amb.datetime_ts.is_unique
+        assert len(amb.datetime_ts) == amb.y_uk.shape[0]
+
+    def test_macro_columns_follow_macro_names_order(self, simulated_df):
+        df = simulated_df.copy()
+        # Names whose requested order is the reverse of alphabetical order
+        df["measure"] = df["measure"].replace(
+            {"macro_0": "unemployment", "macro_1": "cpi"}
+        )
+        region_names, _, covariate_names = _names(df)
+        macro_names = ["unemployment", "cpi"]
+
+        macro = prep_data_for_model_run(df, macro_names, region_names, covariate_names)[
+            3
+        ]
+
+        for col, name in enumerate(macro_names):
+            expected = df.loc[df["measure"] == name].sort_values("datetime")["value"]
+            np.testing.assert_array_equal(macro[:, col], expected.values)
+
+    def test_annual_rows_only_at_year_end_align_to_spine(self, simulated_df):
+        """Regional data supplied without NaN padding rows must land on the
+        same quarters as the padded version."""
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        is_padding = (simulated_df["measure"] == "gva_q_on_4q") & simulated_df[
+            "value"
+        ].isna()
+        df_no_padding = simulated_df.loc[~is_padding]
+
+        expected = prep_data_for_model_run(
+            simulated_df, macro_names, region_names, covariate_names
+        )
+        result = prep_data_for_model_run(
+            df_no_padding, macro_names, region_names, covariate_names
+        )
+
+        assert is_padding.any()
+        np.testing.assert_array_equal(result[1], expected[1])
+        assert result[4] == expected[4]  # same publication lag
+
+    def test_duplicate_rows_raise(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        df = pd.concat([simulated_df, simulated_df.iloc[[0]]], ignore_index=True)
+
+        with pytest.raises(ValueError, match="Duplicate rows"):
+            prep_data_for_model_run(df, macro_names, region_names, covariate_names)
+
+    def test_gap_in_aggregate_series_raises(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        is_gap = (simulated_df["measure"] == "gva_q_on_q") & (
+            simulated_df["datetime"] == dates[10]
+        )
+
+        with pytest.raises(ValueError, match="missing quarters"):
+            prep_data_for_model_run(
+                simulated_df.loc[~is_gap], macro_names, region_names, covariate_names
+            )
+
+    def test_incomplete_macro_series_raises(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        is_missing = (simulated_df["measure"] == macro_names[0]) & (
+            simulated_df["datetime"] == dates[-1]
+        )
+
+        with pytest.raises(ValueError, match="Macro series with missing values"):
+            prep_data_for_model_run(
+                simulated_df.loc[~is_missing],
+                macro_names,
+                region_names,
+                covariate_names,
+            )
+
+
+class TestCalendarOffset:
+    @pytest.mark.parametrize(
+        ("first_date", "expected"),
+        [
+            ("2000-03-31", 0),
+            ("2000-06-30", 3),
+            ("2000-09-30", 2),
+            ("2000-12-31", 1),
+        ],
+    )
+    def test_first_q1_offset(self, first_date, expected):
+        spine = pd.date_range(first_date, periods=12, freq="QE")
+
+        offset = first_q1_offset(spine)
+
+        assert offset == expected
+        assert spine[offset].quarter == 1
+
+    def test_aggregate_skips_rows_before_first_q1(self):
+        X = np.arange(11, dtype=np.float64).reshape(-1, 1)  # rows 0,1 are Q3,Q4
+
+        result = _aggregate_quarterly_to_annual(X, q1_offset=2)
+
+        np.testing.assert_allclose(result[:, 0], [3.5, 7.5])
+
+    def test_xgboost_start_quarter_does_not_change_predictions(self):
+        """Dropping the first two quarters (so the sample starts in Q3) must
+        give the same annual predictions for the years that remain."""
+        rng = np.random.default_rng(0)
+        T, R, J, M = 40, 3, 2, 1
+        Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+        macro = rng.normal(size=(T, M))
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = rng.normal(size=(len(range(7, T, 4)), R))  # year 0 unobserved
+
+        _, expected = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, result = train_xgboost_annual(
+            [z[2:] for z in Z_panel], macro[2:], y_annual[2:], q1_offset=2
+        )
+
+        np.testing.assert_allclose(result, expected[1:])
+
+    def test_bridge_signal_sums_to_annual_fit_when_sample_starts_mid_year(self):
+        rng = np.random.default_rng(1)
+        T, R, J, offset = 38, 3, 2, 2
+        Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+        y_uk = rng.normal(scale=0.5, size=T)
+        macro = rng.normal(size=(T, 1))
+        y_annual = np.full((T, R), np.nan)
+        q4_rows = np.arange(offset + 3, T, 4)
+        y_annual[q4_rows] = rng.normal(size=(len(q4_rows), R))
+        xgb_preds = rng.normal(size=(len(q4_rows), R))
+
+        signal, info = fit_bridge_equation(
+            y_annual, xgb_preds, Z_panel, y_uk, macro, use_almon=False, q1_offset=offset
+        )
+
+        # Summing the quarterly signal over a calendar year reproduces the
+        # bridge regression's annual fitted value.
+        for a, q4 in enumerate(q4_rows):
+            for r in range(R):
+                indicators = np.concatenate(
+                    [[y_uk[q4 - 3 : q4 + 1].mean()]]
+                    + [[Z_panel[j][q4 - 3 : q4 + 1, r].mean()] for j in range(J)]
+                )
+                fitted = info["bridge_reg"].predict(
+                    np.concatenate([[xgb_preds[a, r]], indicators]).reshape(1, -1)
+                )[0]
+                assert signal[q4 - 3 : q4 + 1, r].sum() == pytest.approx(fitted)
+
+    def test_ambric_detects_mid_year_start(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        df = simulated_df.loc[simulated_df["datetime"] >= dates[2]]  # starts in Q3
+
+        amb = Ambric(df, macro_names, region_names, covariate_names)
+
+        assert amb.q1_offset == 2
+        assert amb.datetime_ts.iloc[amb.q1_offset].quarter == 1
+
+    def test_sample_starts_six_quarters_before_first_annual_observation(
+        self, simulated_df
+    ):
+        """With year-end-only regional rows, the sample keeps the six earlier
+        quarters that the first annual observation depends on."""
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        is_padding = (simulated_df["measure"] == "gva_q_on_4q") & simulated_df[
+            "value"
+        ].isna()
+        df = simulated_df.loc[~is_padding]
+        first_obs = df.loc[df["measure"] == "gva_q_on_4q", "datetime"].min()
+
+        amb = Ambric(df, macro_names, region_names, covariate_names)
+
+        assert amb.datetime_ts.iloc[6] == first_obs
+        assert not np.any(np.isnan(amb.y_annual[6]))
+
+
+class TestEarlyAnnualObservations:
+    def test_observations_without_full_lag_window_are_excluded(self):
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 1
+        y_annual = np.full((T, R), np.nan)
+        y_annual[3::4] = 0.02  # rows 3, 7, 11, 15; row 3 lacks a full window
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, K)),
+            macro=rng.normal(size=(T, M)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+        )
+
+        n_observed = model["obs_annual_observed"].eval().size
+        assert n_observed == 3 * R
+
+    def test_annual_estimates_are_nan_before_full_lag_window(self):
+        rng = np.random.default_rng(0)
+        T, R = 12, 2
+        trace = az.from_dict(
+            posterior={
+                "y_reg": rng.normal(size=(1, 20, T, R)),
+                "w": np.full((1, 20, R), 0.5),
+            }
+        )
+
+        _, _, y_annual_est = trace_to_series(trace)
+
+        assert np.all(np.isnan(y_annual_est[:6]))
+        assert not np.any(np.isnan(y_annual_est[6:]))

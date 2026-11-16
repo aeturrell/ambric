@@ -61,7 +61,13 @@ from ambric.diagnostics import (
     plot_single_region_annual_estimate,
     trace_to_series,
 )
-from ambric.utilities import OMEGA, gen_unique_id, prep_data_for_model_run
+from ambric.utilities import (
+    OMEGA,
+    build_datetime_spine,
+    first_q1_offset,
+    gen_unique_id,
+    prep_data_for_model_run,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -244,22 +250,55 @@ def extract_factors_from_panel(
 # =============================================================================
 
 
-def _aggregate_quarterly_to_annual(
-    X_quarterly: npt.NDArray[np.float64],
-) -> npt.NDArray[np.float64]:
-    """Average quarterly data to annual (groups of 4 quarters).
+def _n_complete_years(T: int, q1_offset: int = 0) -> int:
+    """Number of complete calendar years in T quarters.
 
     Args:
-        X_quarterly: Array of shape (T, P) where T is divisible by 4.
+        T: Number of quarterly rows.
+        q1_offset: Row index of the first calendar Q1 (0..3).
 
     Returns:
-        Array of shape (T//4, P) of annual averages.
+        Number of complete (Q1..Q4) calendar years.
+    """
+    if not 0 <= q1_offset <= 3:
+        raise ValueError(f"q1_offset must be between 0 and 3, got {q1_offset}.")
+    return max(T - q1_offset, 0) // 4
+
+
+def _complete_years_view(
+    X_quarterly: npt.NDArray[np.float64], q1_offset: int = 0
+) -> npt.NDArray[np.float64]:
+    """Reshape quarterly data to (n_years, 4, P) over complete calendar years.
+
+    Rows before the first Q1 and after the last Q4 are dropped.
+
+    Args:
+        X_quarterly: Array of shape (T, P).
+        q1_offset: Row index of the first calendar Q1 (0..3).
+
+    Returns:
+        Array of shape (n_years, 4, P).
     """
     T, P = X_quarterly.shape
-    n_complete_years = T // 4
-    T_use = n_complete_years * 4
-    X_trimmed = X_quarterly[:T_use]
-    return X_trimmed.reshape(n_complete_years, 4, P).mean(axis=1)
+    n_years = _n_complete_years(T, q1_offset)
+    return X_quarterly[q1_offset : q1_offset + 4 * n_years].reshape(n_years, 4, P)
+
+
+def _aggregate_quarterly_to_annual(
+    X_quarterly: npt.NDArray[np.float64],
+    q1_offset: int = 0,
+) -> npt.NDArray[np.float64]:
+    """Average quarterly data to annual (complete calendar years).
+
+    Args:
+        X_quarterly: Array of shape (T, P).
+        q1_offset: Row index of the first calendar Q1 (0..3). Rows before
+            it, and any incomplete final year, are dropped.
+
+    Returns:
+        Array of shape (n_years, P) of annual averages.
+    """
+    return _complete_years_view(X_quarterly, q1_offset).mean(axis=1)
 
 
 def train_xgboost_annual(
@@ -267,6 +306,7 @@ def train_xgboost_annual(
     macro: npt.NDArray[np.float64],
     y_annual: npt.NDArray[np.float64],
     xgb_params: dict | None = None,
+    q1_offset: int = 0,
 ) -> tuple[XGBRegressor, npt.NDArray[np.float64]]:
     """Train XGBoost to predict annual regional growth from annually-aggregated features.
 
@@ -280,6 +320,8 @@ def train_xgboost_annual(
         macro: (T, M) national macro series.
         y_annual: (T, R) annual growth, observed only at Q4 (rest NaN).
         xgb_params: Optional XGBoost hyperparameters.
+        q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
+            covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
 
     Returns:
         Tuple of (fitted XGBRegressor, annual predictions (n_years, R)).
@@ -287,9 +329,9 @@ def train_xgboost_annual(
     T, R = y_annual.shape
     J = len(Z_panel)
     M = macro.shape[1]
-    n_years = T // 4
+    n_years = _n_complete_years(T, q1_offset)
 
-    macro_annual = _aggregate_quarterly_to_annual(macro)
+    macro_annual = _aggregate_quarterly_to_annual(macro, q1_offset)
 
     # Build pooled training panel
     X_rows = []
@@ -297,11 +339,11 @@ def train_xgboost_annual(
 
     for r in range(R):
         Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r)
+        Z_r_annual = _aggregate_quarterly_to_annual(Z_r, q1_offset)
 
         for a in range(n_years):
-            q4_idx = 4 * a + 3
-            if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
+            q4_idx = q1_offset + 4 * a + 3
+            if not np.isnan(y_annual[q4_idx, r]):
                 features = np.concatenate([Z_r_annual[a], macro_annual[a]])
                 X_rows.append(features)
                 y_rows.append(y_annual[q4_idx, r])
@@ -341,7 +383,7 @@ def train_xgboost_annual(
     xgb_annual_preds = np.full((n_years, R), np.nan)
     for r in range(R):
         Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r)
+        Z_r_annual = _aggregate_quarterly_to_annual(Z_r, q1_offset)
         for a in range(n_years):
             features = np.concatenate([Z_r_annual[a], macro_annual[a]])
             xgb_annual_preds[a, r] = model.predict(features.reshape(1, -1))[0]
@@ -381,23 +423,22 @@ def _almon_weights(theta1: float, theta2: float, n_lags: int = 4) -> npt.NDArray
 def _apply_midas_weights(
     X_quarterly: npt.NDArray[np.float64],
     weights: npt.NDArray[np.float64],
+    q1_offset: int = 0,
 ) -> npt.NDArray[np.float64]:
     """Apply MIDAS weights to quarterly data to get annual weighted aggregates.
 
-    For each year a with quarters q=0..3 (Q1..Q4):
-        X_annual[a] = sum_{q=0}^{3} w_q * X_{4a+q}
+    For each complete calendar year a with quarters q=0..3 (Q1..Q4):
+        X_annual[a] = sum_{q=0}^{3} w_q * X_{q1_offset+4a+q}
 
     Args:
         X_quarterly: (T, P) quarterly data.
         weights: (4,) MIDAS weights.
+        q1_offset: Row index of the first calendar Q1 (0..3).
 
     Returns:
         (n_years, P) weighted annual aggregates.
     """
-    T, P = X_quarterly.shape
-    n_years = T // 4
-    T_use = n_years * 4
-    X_reshaped = X_quarterly[:T_use].reshape(n_years, 4, P)
+    X_reshaped = _complete_years_view(X_quarterly, q1_offset)
     return np.sum(X_reshaped * weights[np.newaxis, :, np.newaxis], axis=1)
 
 
@@ -409,6 +450,7 @@ def fit_bridge_equation(
     macro: npt.NDArray[np.float64],
     use_almon: bool = True,
     ridge_alpha: float = 1.0,
+    q1_offset: int = 0,
 ) -> tuple[npt.NDArray[np.float64], dict]:
     """Fit bridge equation and produce quarterly signal s_{t,r}.
 
@@ -432,13 +474,15 @@ def fit_bridge_equation(
         macro: (T, M) macro series.
         use_almon: Estimate Almon polynomial weights vs equal weights.
         ridge_alpha: Ridge regularisation strength.
+        q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
+            covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
 
     Returns:
         Tuple of (quarterly_signal (T, R), bridge_info dict).
     """
     T, R = y_annual.shape
     J = len(Z_panel)
-    n_years = T // 4
+    n_years = _n_complete_years(T, q1_offset)
     # P = 1 + J  # y_uk + J regional indicators
 
     def _build_quarterly_indicators_for_region(r: int) -> npt.NDArray:
@@ -459,10 +503,10 @@ def fit_bridge_equation(
             y_rows = []
             for r in range(R):
                 Q_r = _build_quarterly_indicators_for_region(r)
-                Q_r_annual = _apply_midas_weights(Q_r, weights)
+                Q_r_annual = _apply_midas_weights(Q_r, weights, q1_offset)
                 for a in range(n_years):
-                    q4_idx = 4 * a + 3
-                    if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
+                    q4_idx = q1_offset + 4 * a + 3
+                    if not np.isnan(y_annual[q4_idx, r]):
                         row = np.concatenate([[xgb_annual_preds[a, r]], Q_r_annual[a]])
                         X_rows.append(row)
                         y_rows.append(y_annual[q4_idx, r])
@@ -504,10 +548,10 @@ def fit_bridge_equation(
 
     for r in range(R):
         Q_r = _build_quarterly_indicators_for_region(r)
-        Q_r_annual = _apply_midas_weights(Q_r, midas_weights)
+        Q_r_annual = _apply_midas_weights(Q_r, midas_weights, q1_offset)
         for a in range(n_years):
-            q4_idx = 4 * a + 3
-            if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
+            q4_idx = q1_offset + 4 * a + 3
+            if not np.isnan(y_annual[q4_idx, r]):
                 row = np.concatenate([[xgb_annual_preds[a, r]], Q_r_annual[a]])
                 X_bridge_rows.append(row)
                 y_bridge_rows.append(y_annual[q4_idx, r])
@@ -544,8 +588,10 @@ def fit_bridge_equation(
     for r in range(R):
         Q_r = _build_quarterly_indicators_for_region(r)
         for t in range(T):
-            a = min(t // 4, n_years - 1)
-            q = t % 4
+            # Quarters outside the complete years (before the first Q1 or
+            # in an incomplete final year) use the nearest complete year.
+            a = min(max((t - q1_offset) // 4, 0), n_years - 1)
+            q = (t - q1_offset) % 4
 
             xgb_component = (delta / 4.0) * xgb_annual_preds[a, r]
             indicator_component = np.sum(betas * midas_weights[q] * Q_r[t])
@@ -728,6 +774,7 @@ def build_ambric_model(
             * pt.sum(
                 ((y_reg[0] - mu_exog[0]) / sigma_eps)  # ty: ignore[not-subscriptable]
                 ** 2
+                + 2 * pt.log(sigma_eps)
             ),
         )
 
@@ -736,15 +783,33 @@ def build_ambric_model(
         pm.StudentT("obs_uk", nu=nu_uk, mu=mu_uk, sigma=sigma_uk, observed=y_uk)
 
         # --- Constraint: Annual Regional Growth (temporal convolution) ---
+        # Annual growth at row t needs quarterly growth back to row t-6. For
+        # the first rows that window is incomplete, so observations there
+        # cannot be matched to a full sum and are left out of the likelihood.
+        n_lags = len(OMEGA) - 1
+        y_annual_obs = np.array(y_annual, dtype=np.float64, copy=True)
+        n_early = int(np.sum(~np.isnan(y_annual_obs[:n_lags])))
+        if n_early > 0:
+            logger.info(
+                f"{n_early} annual observations fall in the first {n_lags} "
+                f"quarters, before a full lag window is available; excluding "
+                f"them from the annual constraint."
+            )
+            y_annual_obs[:n_lags] = np.nan
+
         y_lags = [y_reg * OMEGA[0]]
-        for j in range(1, 7):
+        for j in range(1, n_lags + 1):
             y_reg_trimmed = y_reg[:-j, :]  # ty: ignore[not-subscriptable]
             shifted = pt.concatenate([pt.zeros((j, R)), y_reg_trimmed], axis=0)
             y_lags.append(shifted * OMEGA[j])
 
         mu_annual = pt.sum(pt.stack(y_lags), axis=0)
         pm.StudentT(
-            "obs_annual", nu=nu_ann, mu=mu_annual, sigma=sigma_ann, observed=y_annual
+            "obs_annual",
+            nu=nu_ann,
+            mu=mu_annual,
+            sigma=sigma_ann,
+            observed=y_annual_obs,
         )
 
     return model
@@ -840,11 +905,23 @@ class Ambric:
         ]
         if missing_regions:
             raise ValueError(f"Missing regions from dataframe: {missing_regions}")
-        # Cut out any covariates that begin before the relevant regional variables
-        earliest_regional_datetime = df.loc[
-            ((df["region"].isin(region_names)) & (df["measure"] == region_measure)),
-            "datetime",
-        ].min()
+        df = df.copy()
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        # Cut out any covariates that begin before the relevant regional
+        # variables. The sample starts at the earliest regional row, or six
+        # quarters before the first regional observation if that is earlier,
+        # so that the first annual observation has its full lag window
+        # whenever the aggregate data reach back that far.
+        is_regional = (df["region"].isin(region_names)) & (
+            df["measure"] == region_measure
+        )
+        earliest_regional_datetime = df.loc[is_regional, "datetime"].min()
+        first_regional_obs = df.loc[is_regional & df["value"].notna(), "datetime"].min()
+        if pd.notna(first_regional_obs):
+            earliest_regional_datetime = min(
+                earliest_regional_datetime,
+                first_regional_obs - pd.offsets.QuarterEnd(len(OMEGA) - 1),
+            )
         if any(df["datetime"] < earliest_regional_datetime):
             logger.info(
                 f"Data points from before first regional data points detected; truncating start of data to {earliest_regional_datetime.strftime('%Y-%b')}"
@@ -881,9 +958,14 @@ class Ambric:
         self.xgb_model: XGBRegressor | None = None
         self.n_model_fit_iterations: int | None = None
         self.model_id: str = gen_unique_id()
-        self.datetime_ts: pd.Series = df.loc[
-            df["measure"] == aggregate_measure, "datetime"
-        ]
+        spine = build_datetime_spine(
+            df,
+            aggregate_measure=aggregate_measure,
+            aggregation_region=aggregation_region,
+        )
+        self.datetime_ts: pd.Series = pd.Series(spine, name="datetime")
+        # Row index of the first calendar Q1; annual data are for Q4.
+        self.q1_offset: int = first_q1_offset(spine)
         self.region_names = region_names
 
         self._validate_arrays()
@@ -980,6 +1062,7 @@ class Ambric:
             macro=self.macro,
             y_annual=self.y_annual,
             xgb_params=xgb_params,
+            q1_offset=self.q1_offset,
         )
 
         # Step 3: Bridge equation -> quarterly signal
@@ -992,6 +1075,7 @@ class Ambric:
             macro=self.macro,
             use_almon=bridge_use_almon,
             ridge_alpha=bridge_ridge_alpha,
+            q1_offset=self.q1_offset,
         )
 
         # Step 4: Build PyMC model
@@ -1579,12 +1663,19 @@ def run_out_of_sample_exercise(
         pd.DataFrame: Combined out-of-sample nowcasts and outturns across
             all rolling steps.
     """
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
-    stop: int = df.loc[df["measure"] == aggregate_measure, "datetime"].nunique()
+    datetime_spine: pd.Series = pd.Series(
+        build_datetime_spine(
+            df,
+            aggregate_measure=aggregate_measure,
+            aggregation_region=aggregation_region,
+        )
+    )
+    stop: int = len(datetime_spine)
     start = init_chunk_size
     num_steps = math.ceil((stop - start) / step_size)
-    datetime_spine: pd.Series = df.loc[df["measure"] == aggregate_measure, "datetime"]
-    datetime_spine = datetime_spine.sort_values()
     logger.info(f"Running out-of-sample analysis on {region_measure}:\n")
     logger.info(
         f"    burn-in: from {datetime_spine.iloc[0].strftime('%Y-%b')} to {datetime_spine.iloc[start].strftime('%Y-%b')}"
