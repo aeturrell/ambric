@@ -4,6 +4,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from loguru import logger
+from scipy.optimize import nnls
 
 # =============================================================================
 # Global Constants & Weights
@@ -160,6 +161,87 @@ def generate_realistic_simulated_data(
         }
         return df_as_if_real, truth
     return df_as_if_real
+
+
+def normalise_region_weights(
+    region_weights: dict[str, float], region_names: list[str]
+) -> npt.NDArray[np.float64]:
+    """Turn user-supplied regional weights into shares ordered by region_names.
+
+    Args:
+        region_weights (dict[str, float]): Weight for each region, e.g. its
+            share (or level) of national output. Need not sum to one.
+        region_names (list[str]): Region names in model order.
+
+    Raises:
+        ValueError: If the keys do not match ``region_names`` exactly, or
+            if any weight is not a positive, finite number.
+
+    Returns:
+        npt.NDArray[np.float64]: Shares, shape (R,), summing to one.
+    """
+    missing = [r for r in region_names if r not in region_weights]
+    extra = [r for r in region_weights if r not in region_names]
+    if missing or extra:
+        raise ValueError(
+            f"region_weights must have exactly one entry per region. "
+            f"Missing: {missing}; not in region_names: {extra}."
+        )
+    weights = np.array([region_weights[r] for r in region_names], dtype=np.float64)
+    if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+        raise ValueError("region_weights must all be positive, finite numbers.")
+    return weights / weights.sum()
+
+
+def estimate_region_weights(
+    y_uk: npt.NDArray[np.float64],
+    y_annual: npt.NDArray[np.float64],
+    shrinkage: float = 0.2,
+) -> npt.NDArray[np.float64]:
+    """Estimate regional weights from the growth data alone.
+
+    National quarterly growth is aggregated to annual growth with the same
+    weights (``OMEGA``) that link quarterly and annual regional growth, and
+    regressed on the regions' annual growth with weights constrained to be
+    non-negative and sum to one. The estimate is shrunk towards equal
+    weights because regional growth rates move together and there are few
+    annual observations, so the data pin the weights down only loosely.
+    Known shares (e.g. of output) are a better source when available.
+
+    Args:
+        y_uk (npt.NDArray[np.float64]): National quarterly growth, shape (T,).
+        y_annual (npt.NDArray[np.float64]): Regional annual growth, shape
+            (T, R), NaN where unobserved.
+        shrinkage (float): Strength of the pull towards equal weights,
+            relative to the scale of the data. Zero means none.
+
+    Returns:
+        npt.NDArray[np.float64]: Estimated shares, shape (R,), summing to
+            one. Equal weights if no quarter has every region observed.
+    """
+    T, R = y_annual.shape
+    n_lags = len(OMEGA) - 1
+    uk_annual = np.full(T, np.nan)
+    for t in range(n_lags, T):
+        uk_annual[t] = np.sum(OMEGA * y_uk[t - n_lags : t + 1][::-1])
+    rows = ~np.isnan(uk_annual) & ~np.isnan(y_annual).any(axis=1)
+    if not rows.any():
+        return np.full(R, 1.0 / R)
+    A, b = y_annual[rows], uk_annual[rows]
+    scale = np.trace(A.T @ A)
+    if scale <= 0:
+        return np.full(R, 1.0 / R)
+    # Non-negative least squares on an augmented system: the data rows, a
+    # ridge pull of each weight towards 1/R, and a heavily weighted row
+    # enforcing that the weights sum to one.
+    ridge = np.sqrt(shrinkage * scale / R)
+    sum_to_one = 1e3 * np.sqrt(scale)
+    A_aug = np.vstack([A, ridge * np.eye(R), sum_to_one * np.ones((1, R))])
+    b_aug = np.concatenate([b, ridge * np.full(R, 1.0 / R), [sum_to_one]])
+    weights, _ = nnls(A_aug, b_aug)
+    if weights.sum() <= 0:
+        return np.full(R, 1.0 / R)
+    return weights / weights.sum()
 
 
 def gen_unique_id() -> str:

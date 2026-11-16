@@ -70,8 +70,10 @@ from ambric.utilities import (
     OMEGA,
     PRIOR_SCALES,
     build_datetime_spine,
+    estimate_region_weights,
     first_q1_offset,
     gen_unique_id,
+    normalise_region_weights,
     prep_data_for_model_run,
 )
 
@@ -775,6 +777,8 @@ def build_ambric_model(
     macro: npt.NDArray[np.float64],
     bridge_signal: npt.NDArray[np.float64],
     region_q_on_q: npt.NDArray[np.float64] | None = None,
+    weight_prior_mean: npt.NDArray[np.float64] | None = None,
+    weight_prior_concentration: float = 50.0,
 ) -> pm.model.core.Model:
     """Build the AMBRIC Bayesian state-space model.
 
@@ -809,6 +813,17 @@ def build_ambric_model(
             neighbours rather than competing with them through a
             likelihood term. Defaults to ``None`` (no clamp — backwards
             compatible).
+        weight_prior_mean: Prior mean of the regional weights ``w`` that
+            aggregate regional growth to national growth, shape ``(R,)``,
+            summing to one. Defaults to equal weights.
+        weight_prior_concentration: How tightly the prior holds ``w`` to its
+            mean. ``w ~ Dirichlet(concentration * mean)``, so the prior
+            standard deviation of ``w_r`` is
+            ``sqrt(mean_r * (1 - mean_r) / (concentration + 1))``.
+
+    Raises:
+        ValueError: If ``weight_prior_mean`` has the wrong shape or
+            ``weight_prior_concentration`` is not positive.
 
     Returns:
         PyMC model object.
@@ -816,6 +831,20 @@ def build_ambric_model(
     T, K = factors.shape
     _, M = macro.shape
     _, R = y_annual.shape
+
+    if weight_prior_mean is None:
+        weight_prior_mean = np.full(R, 1.0 / R)
+    weight_prior_mean = np.asarray(weight_prior_mean, dtype=np.float64)
+    if weight_prior_mean.shape != (R,):
+        raise ValueError(
+            f"weight_prior_mean must have shape ({R},), got {weight_prior_mean.shape}."
+        )
+    if weight_prior_concentration <= 0:
+        raise ValueError("weight_prior_concentration must be positive.")
+    # A Dirichlet needs strictly positive parameters, so a region whose
+    # prior weight is zero is given a small one.
+    weight_prior_mean = np.maximum(weight_prior_mean, 0.1 / R)
+    weight_prior_mean = weight_prior_mean / weight_prior_mean.sum()
 
     logger.info("Building AMBRIC model:")
     logger.debug(f"   {K} factors, {M} macro series, {T} quarters, {R} regions")
@@ -927,8 +956,8 @@ def build_ambric_model(
         )
 
         # --- Regional weights for UK aggregation ---
-        prior_weights = [1 / R for _ in range(R)]
-        w = pm.Normal("w", mu=prior_weights, sigma=0.01, shape=R)
+        # Positive and summing to one, centred on the prior shares.
+        w = pm.Dirichlet("w", a=weight_prior_concentration * weight_prior_mean)
 
         # --- Degrees of freedom ---
         nu_uk = pm.Gamma("nu_uk", alpha=6, beta=1)
@@ -1050,6 +1079,8 @@ class Ambric:
         aggregation_region: str = "uk",
         region_measure: str = "gva_q_on_4q",
         region_q_on_q_measure: str | None = None,
+        region_weights: dict[str, float] | None = None,
+        region_weights_concentration: float | None = None,
     ):
         """Initialise the ambric model.
 
@@ -1086,6 +1117,18 @@ class Ambric:
                 regions and quarters contribute nothing to this term, and
                 the model fits normally. Defaults to ``None`` (no q-on-q
                 observations — backwards compatible).
+            region_weights: Optional weight of each region in the national
+                aggregate, keyed by region name, e.g. each region's share
+                of national output. They need not sum to one. They set the
+                centre of the prior on the weights ``w`` that turn regional
+                growth into national growth. When ``None``, the centre is
+                estimated from the growth data, which is much less precise
+                (see :func:`~ambric.utilities.estimate_region_weights`), so
+                supply known shares where possible.
+            region_weights_concentration: How tightly the prior holds ``w``
+                to its centre (the concentration of a Dirichlet prior;
+                larger is tighter). Defaults to 500 when ``region_weights``
+                is supplied and 50 when the centre is estimated.
         """
         logger.info("Initialising ambric model.")
         required_columns = ["datetime", "measure", "region", "value"]
@@ -1181,6 +1224,35 @@ class Ambric:
         # Row index of the first calendar Q1; annual data are for Q4.
         self.q1_offset: int = first_q1_offset(spine)
         self.region_names = region_names
+        if region_weights is not None:
+            self.weight_prior_mean: npt.NDArray[np.float64] = normalise_region_weights(
+                region_weights, region_names
+            )
+            self.weight_prior_source: str = "supplied"
+            default_concentration = 500.0
+        else:
+            self.weight_prior_mean = estimate_region_weights(y_uk, y_annual)
+            self.weight_prior_source = "estimated"
+            default_concentration = 50.0
+            logger.info(
+                "No region_weights supplied; estimating the prior centre for "
+                "regional weights from the growth data. This is imprecise: "
+                "supply known shares if available."
+            )
+        self.weight_prior_concentration: float = (
+            default_concentration
+            if region_weights_concentration is None
+            else region_weights_concentration
+        )
+        logger.info(
+            f"Prior centre for regional weights ({self.weight_prior_source}): "
+            + ", ".join(
+                f"{name}={weight:.3f}"
+                for name, weight in zip(
+                    region_names, self.weight_prior_mean, strict=True
+                )
+            )
+        )
 
         self._validate_arrays()
 
@@ -1322,6 +1394,8 @@ class Ambric:
             self.macro,
             self.bridge_signal,
             region_q_on_q=self.y_qoq_r,
+            weight_prior_mean=self.weight_prior_mean,
+            weight_prior_concentration=self.weight_prior_concentration,
         )
 
         # Step 5: Variational inference
@@ -1906,6 +1980,8 @@ def run_out_of_sample_exercise(
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
     region_q_on_q_measure: str | None = None,
+    region_weights: dict[str, float] | None = None,
+    region_weights_concentration: float | None = None,
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
@@ -1937,6 +2013,12 @@ def run_out_of_sample_exercise(
             OOS window do not leak into the nowcast. Older published values
             remain as clamps. Defaults to ``None`` (no q-on-q clamp, backwards
             compatible).
+        region_weights (dict[str, float] | None): Optional weight of each
+            region in the national aggregate, passed to :class:`Ambric` at
+            every step. When ``None`` the prior centre for the weights is
+            estimated at each step from the data available at that step.
+        region_weights_concentration (float | None): Tightness of the prior
+            on the weights, passed to :class:`Ambric`.
         step_size (int): Quarters to advance per OOS step. Defaults to 1.
         init_chunk_size (int): Initial learning window size. Defaults to 20.
         lag_qtrs (int): How many quarters before annual regional data are
@@ -2019,6 +2101,8 @@ def run_out_of_sample_exercise(
             aggregation_region=aggregation_region,
             region_measure=region_measure,
             region_q_on_q_measure=region_q_on_q_measure,
+            region_weights=region_weights,
+            region_weights_concentration=region_weights_concentration,
         )
 
         logger.info("Ambric model created with ID: " + amb.model_id)

@@ -64,3 +64,22 @@ def test_recovery_benchmark():
     assert metrics["bridge_r2"] > 0.3
     for name in ("sigma_eps_ratio", "sigma_uk_ratio", "sigma_annual_ratio"):
         assert metrics[name] < 6
+
+
+@pytest.mark.slow
+def test_recovery_benchmark_with_supplied_unequal_weights():
+    """When regions differ in size and their shares are supplied, the
+    posterior weights stay on those shares (measured largest error 0.003)
+    and sum to one. Run with ``pytest -m slow``."""
+    w_true = np.array(
+        [0.24, 0.15, 0.10, 0.09, 0.08, 0.08, 0.07, 0.06, 0.05, 0.04, 0.02, 0.02]
+    )
+
+    metrics = run_recovery_benchmark(
+        w_true=w_true, supply_weights=True, n_model_fit_iterations=200000
+    )
+
+    assert metrics["w_sum"] == pytest.approx(1.0)
+    assert metrics["w_max_abs_error"] < 0.02
+    assert metrics["quarterly_corr"] > 0.8
+    assert metrics["national_rmse"] < 0.001

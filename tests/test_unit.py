@@ -35,8 +35,11 @@ from ambric.diagnostics import (
     trace_to_series,
 )
 from ambric.utilities import (
+    OMEGA,
+    estimate_region_weights,
     first_q1_offset,
     generate_realistic_simulated_data,
+    normalise_region_weights,
     prep_data_for_model_run,
 )
 
@@ -1126,3 +1129,127 @@ class TestOutOfFoldPredictions:
         np.testing.assert_allclose(
             signal_edge[40:] - signal_nearest[40:], np.tile(expected_shift, (2, 1))
         )
+
+
+# ── Regional weights ────────────────────────────────────────────────────────
+
+
+class TestRegionWeights:
+    def test_supplied_weights_are_normalised_in_region_order(self):
+        result = normalise_region_weights({"b": 30.0, "a": 10.0}, ["a", "b"])
+
+        np.testing.assert_allclose(result, [0.25, 0.75])
+
+    @pytest.mark.parametrize(
+        "weights",
+        [{"a": 0.5}, {"a": 0.5, "b": 0.3, "c": 0.2}, {"a": 0.5, "b": -0.1}],
+        ids=["missing region", "unknown region", "negative weight"],
+    )
+    def test_invalid_supplied_weights_raise(self, weights):
+        with pytest.raises(ValueError, match="region_weights"):
+            normalise_region_weights(weights, ["a", "b"])
+
+    def test_estimated_weights_are_valid_shares(self):
+        rng = np.random.default_rng(0)
+        T, R = 80, 4
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = rng.normal(scale=0.02, size=(len(range(7, T, 4)), R))
+
+        weights = estimate_region_weights(rng.normal(scale=0.005, size=T), y_annual)
+
+        assert weights.shape == (R,)
+        assert weights.sum() == pytest.approx(1.0)
+        assert np.all(weights >= 0)
+
+    def test_estimated_weights_recover_clear_differences(self):
+        """With exact aggregation and independent regions, the estimate
+        ranks the regions correctly and is closer to the truth than equal
+        weights are."""
+        rng = np.random.default_rng(0)
+        T, R = 200, 3
+        w_true = np.array([0.6, 0.3, 0.1])
+        y_reg = rng.normal(scale=0.01, size=(T, R))
+        y_uk = y_reg @ w_true
+        y_annual = np.full((T, R), np.nan)
+        for t in range(7, T, 4):
+            y_annual[t] = sum(OMEGA[j] * y_reg[t - j] for j in range(7))
+
+        weights = estimate_region_weights(y_uk, y_annual)
+
+        assert list(np.argsort(weights)) == [2, 1, 0]
+        assert np.abs(weights - w_true).max() < np.abs(1 / R - w_true).max()
+
+    def test_no_complete_annual_rows_gives_equal_weights(self):
+        y_annual = np.full((20, 4), np.nan)
+
+        weights = estimate_region_weights(np.zeros(20), y_annual)
+
+        np.testing.assert_allclose(weights, 0.25)
+
+    def test_weight_prior_is_centred_on_supplied_shares_and_sums_to_one(self):
+        rng = np.random.default_rng(0)
+        T, R = 16, 3
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+        prior_mean = np.array([0.6, 0.3, 0.1])
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, 1)),
+            macro=rng.normal(size=(T, 1)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+            weight_prior_mean=prior_mean,
+            weight_prior_concentration=500.0,
+        )
+        w_prior = pm.sample_prior_predictive(
+            draws=2000, model=model, var_names=["w"], random_seed=0
+        ).prior["w"]
+
+        np.testing.assert_allclose(
+            w_prior.mean(dim=("chain", "draw")).values, prior_mean, atol=0.005
+        )
+        np.testing.assert_allclose(w_prior.sum(dim="w_dim_0").values, 1.0)
+        assert float(w_prior.min()) > 0
+
+    def test_ambric_uses_supplied_weights(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shares = {name: float(i + 1) for i, name in enumerate(region_names)}
+
+        amb = Ambric(
+            simulated_df,
+            macro_names,
+            region_names,
+            covariate_names,
+            region_weights=shares,
+        )
+
+        np.testing.assert_allclose(amb.weight_prior_mean, np.arange(1, 5) / 10)
+        assert amb.weight_prior_source == "supplied"
+        assert amb.weight_prior_concentration == 500.0
+
+    def test_ambric_estimates_weights_when_none_supplied(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+
+        amb = Ambric(simulated_df, macro_names, region_names, covariate_names)
+
+        assert amb.weight_prior_source == "estimated"
+        assert amb.weight_prior_concentration == 50.0
+        assert amb.weight_prior_mean.sum() == pytest.approx(1.0)
+
+    def test_implied_national_growth_is_the_weighted_sum(self):
+        """National growth must be sum_r w_r * y_reg[t, r], which differs
+        from the plain regional mean when weights are unequal."""
+        rng = np.random.default_rng(0)
+        T, R, draws = 20, 3, 50
+        y_reg = rng.normal(size=(1, draws, T, R))
+        weights = np.array([0.7, 0.2, 0.1])
+        trace = az.from_dict(
+            posterior={"y_reg": y_reg, "w": np.broadcast_to(weights, (1, draws, R))}
+        )
+
+        y_uk_est, _, _ = trace_to_series(trace)
+
+        expected = y_reg.mean(axis=(0, 1)) @ weights
+        np.testing.assert_allclose(y_uk_est, expected)
+        assert np.abs(y_uk_est - y_reg.mean(axis=(0, 1, 3))).max() > 0.05

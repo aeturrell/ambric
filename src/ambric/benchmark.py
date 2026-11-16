@@ -24,6 +24,7 @@ def run_recovery_benchmark(
     lag_qtrs: int = 6,
     seed: int = 34,
     w_true: npt.NDArray[np.float64] | None = None,
+    supply_weights: bool = False,
     n_model_fit_iterations: int = 200000,
     n_posterior_samples: int = 1000,
 ) -> dict[str, float]:
@@ -39,6 +40,9 @@ def run_recovery_benchmark(
         seed (int): Random seed for the simulated data.
         w_true (npt.NDArray[np.float64] | None): True regional weights, shape
             (R,). Defaults to equal weights.
+        supply_weights (bool): If True, give the model the true weights as
+            ``region_weights``. If False, the model estimates the centre of
+            its weight prior from the data.
         n_model_fit_iterations (int): Number of ADVI iterations.
         n_posterior_samples (int): Number of posterior samples to draw.
 
@@ -84,7 +88,14 @@ def run_recovery_benchmark(
         x for x in df["measure"].unique() if "regional_covar" in x
     )
     amb = Ambric(
-        df, macro_names, region_names, region_covariate_names, n_factors=n_factors
+        df,
+        macro_names,
+        region_names,
+        region_covariate_names,
+        n_factors=n_factors,
+        region_weights=dict(zip(region_names, truth["w_true"], strict=True))
+        if supply_weights
+        else None,
     )
     amb.fit(
         n_model_fit_iterations=n_model_fit_iterations,

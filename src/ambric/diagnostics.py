@@ -135,12 +135,13 @@ def trace_to_series(
     # Quarterly regional estimates
     y_q_r_est_point = posterior["y_reg"].mean(dim=("chain", "draw")).values
 
-    # UK quarterly estimates
-    y_q_uk_dist_est = (posterior["y_reg"] * posterior["w"]).sum(dim="w_dim_0")
-    y_q_uk_est_point = y_q_uk_dist_est.mean(dim=("chain", "draw")).values
-
-    # Now take the mean over the regional axis to get the national growth rates
-    y_q_uk_est_point = y_q_uk_est_point.mean(axis=1)
+    # UK quarterly estimates: the weighted sum of regional growth,
+    # sum_r w_r * y_reg[t, r], formed draw by draw and then averaged. The
+    # two variables name their region dimension differently, so the sum is
+    # taken on the underlying arrays: (chain, draw, T, R) with (chain, draw, R).
+    y_q_uk_est_point = np.einsum(
+        "cdtr,cdr->cdt", posterior["y_reg"].values, posterior["w"].values
+    ).mean(axis=(0, 1))
 
     # Annual regional estimates
 
