@@ -49,13 +49,17 @@ class TestSimulatorTruth:
 
 
 @pytest.mark.slow
-def test_recovery_benchmark_baseline():
-    """Full-length fit on simulated data. Thresholds are a floor set from the
-    model's behaviour when the benchmark was introduced; they are tightened
-    as the model improves. Run with ``pytest -m slow``."""
+def test_recovery_benchmark():
+    """Full-length fit on simulated data, in decimal growth rates. Thresholds
+    sit a little below the values measured when they were last updated
+    (quarterly correlation 0.88, noise scales 3-4x truth, bridge R² 0.89) and
+    are tightened as the model improves. Run with ``pytest -m slow``."""
     metrics = run_recovery_benchmark(n_model_fit_iterations=200000)
 
-    assert metrics["quarterly_corr"] > 0.6
-    assert metrics["quarterly_rmse"] < metrics["quarterly_sd_truth"]
-    assert metrics["annual_in_sample_rmse"] < metrics["annual_sd_truth"]
-    assert metrics["national_rmse"] < 0.002
+    assert metrics["quarterly_corr"] > 0.85
+    assert metrics["quarterly_rmse"] < 0.6 * metrics["quarterly_sd_truth"]
+    assert metrics["annual_in_sample_rmse"] < 0.4 * metrics["annual_sd_truth"]
+    assert metrics["national_rmse"] < 0.001
+    assert metrics["bridge_r2"] > 0.5
+    for name in ("sigma_eps_ratio", "sigma_uk_ratio", "sigma_annual_ratio"):
+        assert metrics[name] < 6

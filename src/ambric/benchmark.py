@@ -59,6 +59,9 @@ def run_recovery_benchmark(
             - ``w_sum``: sum of posterior mean weights.
             - ``w_max_abs_error``: largest absolute error in a weight.
             - ``bridge_r2``: R² reported by the bridge equation.
+            - ``advi_converged``: 1.0 if the fit was judged converged, else 0.0.
+            - ``advi_final_improvement``, ``advi_standard_error``: fall in
+              mean loss between the last two windows, and its standard error.
     """
     # Imported here because ambric/__init__.py imports from this package's
     # other modules at import time.
@@ -88,6 +91,7 @@ def run_recovery_benchmark(
         n_posterior_samples=n_posterior_samples,
     )
     assert amb.trace is not None and amb.bridge_info is not None
+    assert amb.advi_convergence is not None
 
     # Align the truth to the model's (possibly truncated) sample.
     rows = np.flatnonzero(np.isin(truth["datetime"], amb.datetime_ts))
@@ -124,6 +128,9 @@ def run_recovery_benchmark(
         "w_sum": float(w_est.sum()),
         "w_max_abs_error": float(np.max(np.abs(w_est - truth["w_true"]))),
         "bridge_r2": float(amb.bridge_info["bridge_r2"]),
+        "advi_converged": float(amb.advi_convergence["converged"]),
+        "advi_final_improvement": float(amb.advi_convergence["improvement"]),
+        "advi_standard_error": float(amb.advi_convergence["standard_error"]),
     }
     logger.info("Recovery benchmark:")
     for name, value in metrics.items():

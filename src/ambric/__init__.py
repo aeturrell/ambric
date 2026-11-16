@@ -43,6 +43,7 @@ from scipy.optimize import minimize
 from sklearn.decomposition import FactorAnalysis
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import BayesianRidge, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler, StandardScaler
@@ -65,7 +66,9 @@ from ambric.diagnostics import (
     trace_to_series,
 )
 from ambric.utilities import (
+    GROWTH_SCALE,
     OMEGA,
+    PRIOR_SCALES,
     build_datetime_spine,
     first_q1_offset,
     gen_unique_id,
@@ -328,6 +331,9 @@ def train_xgboost_annual(
 
     Returns:
         Tuple of (fitted XGBRegressor, annual predictions (n_years, R)).
+        The regressor is fitted to the standardised target; multiply its
+        predictions by ``model.target_scale_`` and add ``model.target_mean_``
+        to get growth rates. The returned predictions are already growth rates.
     """
     T, R = y_annual.shape
     J = len(Z_panel)
@@ -379,8 +385,22 @@ def train_xgboost_annual(
     if xgb_params is not None:
         default_params.update(xgb_params)
 
+    # The regularisation settings act on the size of the target, so the
+    # target is standardised for fitting and predictions are converted back.
+    # The fit is then the same whatever units growth is measured in.
+    y_mean = float(y_train.mean())
+    y_scale = float(y_train.std())
+    if y_scale == 0:
+        y_scale = 1.0
+
+    def _predict(features: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return model.predict(features) * y_scale + y_mean
+
     model = XGBRegressor(**default_params)
-    model.fit(X_train, y_train)
+    model.fit(X_train, (y_train - y_mean) / y_scale)
+    # Recorded so that the fitted model can be used outside this function.
+    model.target_mean_ = y_mean
+    model.target_scale_ = y_scale
 
     # Predict for all region-years
     xgb_annual_preds = np.full((n_years, R), np.nan)
@@ -389,9 +409,9 @@ def train_xgboost_annual(
         Z_r_annual = _aggregate_quarterly_to_annual(Z_r, q1_offset)
         for a in range(n_years):
             features = np.concatenate([Z_r_annual[a], macro_annual[a]])
-            xgb_annual_preds[a, r] = model.predict(features.reshape(1, -1))[0]
+            xgb_annual_preds[a, r] = _predict(features.reshape(1, -1))[0]
 
-    train_preds = model.predict(X_train)
+    train_preds = _predict(X_train)
     rmse = np.sqrt(np.mean((y_train - train_preds) ** 2))
     logger.info(f"XGBoost: In-sample RMSE = {rmse:.6f}")
 
@@ -445,6 +465,52 @@ def _apply_midas_weights(
     return np.sum(X_reshaped * weights[np.newaxis, :, np.newaxis], axis=1)
 
 
+def _fit_bridge_ridge(
+    X: npt.NDArray[np.float64], y: npt.NDArray[np.float64], ridge_alpha: float
+) -> TransformedTargetRegressor:
+    """Fit the bridge ridge regression on standardised features and target.
+
+    Standardising makes the ridge penalty act the same way whatever units
+    the features and growth rates are in. The returned regressor predicts in
+    the original units of ``y``.
+
+    Args:
+        X: (n, P) features.
+        y: (n,) target.
+        ridge_alpha: Ridge regularisation strength (on standardised data).
+
+    Returns:
+        Fitted regressor.
+    """
+    reg = TransformedTargetRegressor(
+        regressor=make_pipeline(StandardScaler(), Ridge(alpha=ridge_alpha)),
+        transformer=StandardScaler(),
+    )
+    reg.fit(X, y)
+    return reg
+
+
+def _bridge_coefficients(
+    reg: TransformedTargetRegressor,
+) -> tuple[npt.NDArray[np.float64], float]:
+    """Coefficients and intercept of a fitted bridge regression in original units.
+
+    Args:
+        reg: Regressor returned by :func:`_fit_bridge_ridge`.
+
+    Returns:
+        Tuple of (coefficients (P,), intercept) such that
+        ``reg.predict(X) == X @ coefficients + intercept``.
+    """
+    x_scaler, ridge = reg.regressor_[0], reg.regressor_[-1]
+    y_scale = float(reg.transformer_.scale_[0])
+    y_mean = float(reg.transformer_.mean_[0])
+    coefs = ridge.coef_.ravel() * y_scale / x_scaler.scale_
+    intercept = y_mean + y_scale * float(np.ravel(ridge.intercept_)[0])
+    intercept -= float(np.sum(coefs * x_scaler.mean_))
+    return coefs, intercept
+
+
 def fit_bridge_equation(
     y_annual: npt.NDArray[np.float64],
     xgb_annual_preds: npt.NDArray[np.float64],
@@ -476,7 +542,8 @@ def fit_bridge_equation(
         y_uk: (T,) UK quarterly growth.
         macro: (T, M) macro series.
         use_almon: Estimate Almon polynomial weights vs equal weights.
-        ridge_alpha: Ridge regularisation strength.
+        ridge_alpha: Ridge regularisation strength, applied to standardised
+            features and target so it does not depend on their units.
         q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
             covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
 
@@ -517,8 +584,7 @@ def fit_bridge_equation(
             X = np.array(X_rows)
             y = np.array(y_rows)
 
-            reg = Ridge(alpha=ridge_alpha, fit_intercept=True)
-            reg.fit(X, y)
+            reg = _fit_bridge_ridge(X, y, ridge_alpha)
             y_hat = reg.predict(X)
             ss_res = np.sum((y - y_hat) ** 2)
             ss_tot = np.sum((y - y.mean()) ** 2)
@@ -568,8 +634,7 @@ def fit_bridge_equation(
     X_bridge = np.array(X_bridge_rows)
     y_bridge = np.array(y_bridge_rows)
 
-    bridge_reg = Ridge(alpha=ridge_alpha, fit_intercept=True)
-    bridge_reg.fit(X_bridge, y_bridge)
+    bridge_reg = _fit_bridge_ridge(X_bridge, y_bridge, ridge_alpha)
 
     y_hat_bridge = bridge_reg.predict(X_bridge)
     bridge_rmse = np.sqrt(np.mean((y_bridge - y_hat_bridge) ** 2))
@@ -577,9 +642,9 @@ def fit_bridge_equation(
     ss_tot = np.sum((y_bridge - y_bridge.mean()) ** 2)
     bridge_r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    delta = bridge_reg.coef_[0]
-    betas = bridge_reg.coef_[1:]
-    intercept = bridge_reg.intercept_
+    coefs, intercept = _bridge_coefficients(bridge_reg)
+    delta = coefs[0]
+    betas = coefs[1:]
 
     logger.info(f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
     logger.debug(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
@@ -640,16 +705,22 @@ def build_ambric_model(
 
     The exogenous mean for latent regional growth is:
 
-        mu_exog[t,r] = Lambda[r] @ F[t] + Gamma[r] @ X[t] + delta_r * s[t,r]
+        mu_exog[t,r] = alpha_r + Lambda[r] @ F[t] + Gamma[r] @ X[t] + delta_r * s[t,r]
 
-    where s[t,r] is the quarterly bridge signal from XGBoost + MIDAS.
-    delta_r has a hierarchical shrinkage prior centred at zero.
+    where s[t,r] is the quarterly bridge signal from XGBoost + MIDAS and
+    X[t] are the macro series, z-scored inside the model. delta_r has a
+    hierarchical shrinkage prior centred at zero.
+
+    Growth rates are decimals (``0.005`` for 0.5%). Prior scales for the
+    growth-unit parameters are in :data:`ambric.utilities.PRIOR_SCALES`;
+    each is sampled as a unit-scale ``*_raw`` variable and rescaled, so the
+    named parameters in the posterior are in decimal growth units.
 
     Args:
-        y_uk: UK quarterly growth rates, shape (T,).
-        y_annual: Regional annual growth rates, shape (T, R).
+        y_uk: UK quarterly growth rates (decimal), shape (T,).
+        y_annual: Regional annual growth rates (decimal), shape (T, R).
         factors: Extracted factors, shape (T, K).
-        macro: Macro UK series, shape (T, M).
+        macro: Macro UK series in any units, shape (T, M).
         bridge_signal: Quarterly bridge signal, shape (T, R).
         region_q_on_q: Optional published quarterly regional growth rates,
             shape ``(T, R)`` with NaN in unobserved cells. Values must be
@@ -675,18 +746,62 @@ def build_ambric_model(
     logger.debug(f"   {K} factors, {M} macro series, {T} quarters, {R} regions")
     logger.debug(f"   Bridge signal: shape {bridge_signal.shape}")
 
+    # Macro series arrive in arbitrary units, so they enter the model
+    # z-scored: Gamma is then the effect on growth of a one standard
+    # deviation move, and its prior does not depend on the user's units.
+    macro_sd = macro.std(axis=0)
+    macro_z = (macro - macro.mean(axis=0)) / np.where(macro_sd > 0, macro_sd, 1.0)
+
+    # Growth rates are decimals (0.005 for 0.5%). Every growth-scale
+    # parameter is sampled as a unit-scale variable (suffix ``_raw``) and
+    # multiplied by its prior scale, so the optimiser works with numbers of
+    # order one. The named parameters below are in decimal growth units.
+    def _scaled(name: str, prior_scale: float, raw):  # noqa: ANN001, ANN202
+        return pm.Deterministic(name, prior_scale * raw)
+
     with pm.Model() as model:
         # --- Hierarchical factor loadings ---
-        Lambda_mu = pm.Normal("Lambda_mu", mu=0, sigma=0.5, shape=K)
-        Lambda_sigma = pm.HalfNormal("Lambda_sigma", sigma=0.2, shape=K)
-        Lambda = pm.Normal("Lambda", mu=Lambda_mu, sigma=Lambda_sigma, shape=(R, K))
+        Lambda_mu = _scaled(
+            "Lambda_mu",
+            PRIOR_SCALES["Lambda_mu"],
+            pm.Normal("Lambda_mu_raw", mu=0, sigma=1, shape=K),
+        )
+        Lambda_sigma = _scaled(
+            "Lambda_sigma",
+            PRIOR_SCALES["Lambda_sigma"],
+            pm.HalfNormal("Lambda_sigma_raw", sigma=1, shape=K),
+        )
+        Lambda = pm.Deterministic(
+            "Lambda",
+            Lambda_mu + Lambda_sigma * pm.Normal("Lambda_raw", 0, 1, shape=(R, K)),
+        )
 
         # --- Hierarchical macro loadings ---
-        Gamma_mu = pm.Normal("Gamma_mu", mu=0, sigma=0.5, shape=M)
-        Gamma_sigma = pm.HalfNormal("Gamma_sigma", sigma=0.15, shape=M)
-        Gamma = pm.Normal("Gamma", mu=Gamma_mu, sigma=Gamma_sigma, shape=(R, M))
+        Gamma_mu = _scaled(
+            "Gamma_mu",
+            PRIOR_SCALES["Gamma_mu"],
+            pm.Normal("Gamma_mu_raw", mu=0, sigma=1, shape=M),
+        )
+        Gamma_sigma = _scaled(
+            "Gamma_sigma",
+            PRIOR_SCALES["Gamma_sigma"],
+            pm.HalfNormal("Gamma_sigma_raw", sigma=1, shape=M),
+        )
+        Gamma = pm.Deterministic(
+            "Gamma",
+            Gamma_mu + Gamma_sigma * pm.Normal("Gamma_raw", 0, 1, shape=(R, M)),
+        )
+
+        # --- Regional mean growth ---
+        # Macro series are centred, so average growth needs its own term.
+        alpha_r = _scaled(
+            "alpha_r",
+            PRIOR_SCALES["alpha_r"],
+            pm.Normal("alpha_r_raw", mu=0, sigma=1, shape=R),
+        )
 
         # --- Hierarchical bridge signal loading ---
+        # The bridge signal is already in growth units, so delta is unitless.
         delta_mu = pm.Normal("delta_mu", mu=0, sigma=0.3)
         delta_sigma = pm.HalfNormal("delta_sigma", sigma=0.15)
         delta_r = pm.Normal("delta_r", mu=delta_mu, sigma=delta_sigma, shape=R)
@@ -694,9 +809,21 @@ def build_ambric_model(
         bridge_data = pm.Data("bridge_signal", bridge_signal)
 
         # --- Noise parameters ---
-        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.1, shape=R)
-        sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.01)
-        sigma_ann = pm.HalfNormal("sigma_ann", sigma=0.2, shape=R)
+        sigma_eps = _scaled(
+            "sigma_eps",
+            PRIOR_SCALES["sigma_eps"],
+            pm.HalfNormal("sigma_eps_raw", sigma=1, shape=R),
+        )
+        sigma_uk = _scaled(
+            "sigma_uk",
+            PRIOR_SCALES["sigma_uk"],
+            pm.HalfNormal("sigma_uk_raw", sigma=1),
+        )
+        sigma_ann = _scaled(
+            "sigma_ann",
+            PRIOR_SCALES["sigma_ann"],
+            pm.HalfNormal("sigma_ann_raw", sigma=1, shape=R),
+        )
 
         # --- Factor AR(1) dynamics ---
         phi_f = pm.Normal("phi_f", 0.7, 0.1, shape=K)
@@ -716,10 +843,11 @@ def build_ambric_model(
         sigma_exog = pm.HalfNormal("sigma_exog", sigma=0.2, shape=K)
         pm.Normal("obs_factors", mu=factors_latent, sigma=sigma_exog, observed=factors)
 
-        # --- Exogenous mean: factors + macro + bridge ---
+        # --- Exogenous mean: intercept + factors + macro + bridge ---
         mu_exog = (
-            pt.dot(factors_latent, Lambda.T)  # ty: ignore[unresolved-attribute]
-            + pt.dot(macro, Gamma.T)  # ty: ignore[unresolved-attribute]
+            alpha_r
+            + pt.dot(factors_latent, Lambda.T)  # ty: ignore[unresolved-attribute]
+            + pt.dot(macro_z, Gamma.T)  # ty: ignore[unresolved-attribute]
             + bridge_data * delta_r  # ty: ignore[unsupported-operator]
         )
 
@@ -733,6 +861,13 @@ def build_ambric_model(
 
         # --- Regional AR(1) dynamics ---
         phi_r = pm.Normal("phi_r", mu=0.5, sigma=0.15, shape=R)
+        y_reg_raw = pm.Normal(
+            "y_reg_raw",
+            mu=0,
+            sigma=PRIOR_SCALES["y_reg"] / GROWTH_SCALE,
+            shape=(T, R),
+        )
+        y_reg_free = GROWTH_SCALE * y_reg_raw
         if region_q_on_q is not None:
             clamp_mask_np = (~np.isnan(region_q_on_q)).astype(np.float64)
             clamp_vals_np = np.where(
@@ -740,7 +875,6 @@ def build_ambric_model(
             ).astype(np.float64)
             clamp_mask = pm.Data("region_qoq_mask", clamp_mask_np)
             clamp_vals = pm.Data("region_qoq_values", clamp_vals_np)
-            y_reg_free = pm.Normal("y_reg_free", mu=0, sigma=1, shape=(T, R))
             y_reg = pm.Deterministic(
                 "y_reg",
                 clamp_mask * clamp_vals  # ty: ignore[unsupported-operator]
@@ -751,7 +885,7 @@ def build_ambric_model(
                 f"region-quarter cells from region_q_on_q."
             )
         else:
-            y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
+            y_reg = pm.Deterministic("y_reg", y_reg_free)
 
         pm.Potential(
             "regional_ar_prior",
@@ -1149,11 +1283,14 @@ class Ambric:
         else:
             logger.warning(
                 f"ADVI has NOT converged after {n_model_fit_iterations} "
-                f"iterations: mean loss was still falling by "
-                f"{self.advi_convergence['improvement']:.2f} between the last two "
-                f"windows of {self.advi_convergence['window']} iterations "
-                f"(tolerance {advi_convergence_tolerance}). Estimates may be "
-                f"unreliable; increase n_model_fit_iterations."
+                f"iterations: mean loss changed by "
+                f"{-self.advi_convergence['improvement']:.2f} "
+                f"(standard error {self.advi_convergence['standard_error']:.2f}) "
+                f"between the last two windows of "
+                f"{self.advi_convergence['window']} iterations; converged means "
+                f"a fall of at most {advi_convergence_tolerance}, measured to "
+                f"that precision. Estimates may be unreliable; increase "
+                f"n_model_fit_iterations."
             )
 
         # For devs: can save model diagram using the below
@@ -1412,7 +1549,9 @@ class Ambric:
                 "Factors are not available. Fit the model before assembling loadings."
             )
         factor_stds = np.std(self.factors, axis=0)
-        macro_stds = np.std(self.macro, axis=0)
+        # Macro series are z-scored inside the model, so Gamma is already the
+        # effect of a one standard deviation move.
+        macro_stds = np.ones(self.macro.shape[1])
         bridge_signal_stds = (
             np.std(self.bridge_signal, axis=0)
             if self.bridge_signal is not None

@@ -11,6 +11,25 @@ from loguru import logger
 # Inter-temporal weights for annual-to-quarterly aggregation
 OMEGA = np.array([1 / 4, 1 / 2, 3 / 4, 1, 3 / 4, 1 / 2, 1 / 4])
 
+# Typical size of a quarterly growth rate in decimal units. Latent growth
+# is sampled in multiples of this so the optimiser works with numbers of
+# order one.
+GROWTH_SCALE = 0.01
+
+# Prior scales for parameters measured in decimal growth units (0.005 = 0.5%).
+# Quarterly growth is typically of order 0.005 and annual growth 0.02.
+PRIOR_SCALES: dict[str, float] = {
+    "Lambda_mu": 0.01,  # sd of mean factor loading (growth per unit factor)
+    "Lambda_sigma": 0.004,  # HalfNormal scale of loading spread across regions
+    "Gamma_mu": 0.01,  # sd of mean macro loading (growth per sd of macro)
+    "Gamma_sigma": 0.003,  # HalfNormal scale of loading spread across regions
+    "alpha_r": 0.01,  # sd of regional mean quarterly growth
+    "sigma_eps": 0.005,  # HalfNormal scale of regional quarterly innovations
+    "sigma_uk": 0.001,  # HalfNormal scale of the national constraint's slack
+    "sigma_ann": 0.01,  # HalfNormal scale of the annual constraint's slack
+    "y_reg": 0.05,  # sd of the diffuse prior on quarterly regional growth
+}
+
 # Noise scales of the simulated data generating process (decimal growth rates)
 SIM_SIGMA_EPS = 0.002  # regional quarterly innovation
 SIM_SIGMA_UK = 0.0005  # national aggregation noise

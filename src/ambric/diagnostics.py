@@ -1466,7 +1466,10 @@ def assess_advi_convergence(
     Compares the mean loss (negative ELBO, in nats) over the final
     ``window_fraction`` of iterations with the mean over the window of the
     same length just before it. The fit is treated as converged when the
-    loss fell by no more than ``tolerance`` nats between the two windows.
+    loss fell by no more than ``tolerance`` nats between the two windows
+    and the windows are long enough to measure that: the standard error of
+    the difference must also be within ``tolerance``. A short or very noisy
+    run therefore never counts as converged.
 
     Args:
         loss_history (npt.NDArray[np.float64]): Loss at each iteration.
@@ -1478,7 +1481,8 @@ def assess_advi_convergence(
         dict: With keys ``converged`` (bool), ``final_loss`` (mean loss in
             the final window), ``improvement`` (fall in mean loss between
             the two windows; positive means still improving),
-            ``window`` (iterations per window) and ``n_iterations``.
+            ``standard_error`` (of that fall), ``window`` (iterations per
+            window) and ``n_iterations``.
     """
     losses = np.asarray(loss_history, dtype=np.float64)
     n = len(losses)
@@ -1488,15 +1492,19 @@ def assess_advi_convergence(
             "converged": False,
             "final_loss": float(losses[-1]) if n > 0 else float("nan"),
             "improvement": float("nan"),
+            "standard_error": float("nan"),
             "window": window,
             "n_iterations": n,
         }
-    final_loss = float(losses[-window:].mean())
-    improvement = float(losses[-2 * window : -window].mean()) - final_loss
+    last, previous = losses[-window:], losses[-2 * window : -window]
+    final_loss = float(last.mean())
+    improvement = float(previous.mean()) - final_loss
+    standard_error = float(np.sqrt((last.var() + previous.var()) / window))
     return {
-        "converged": bool(improvement <= tolerance),
+        "converged": bool(improvement <= tolerance and standard_error <= tolerance),
         "final_loss": final_loss,
         "improvement": improvement,
+        "standard_error": standard_error,
         "window": window,
         "n_iterations": n,
     }

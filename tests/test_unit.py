@@ -8,6 +8,7 @@ validation paths are exercised.
 import arviz as az
 import numpy as np
 import pandas as pd
+import pymc as pm
 import pytest
 from loguru import logger
 
@@ -853,6 +854,17 @@ class TestAdviConvergence:
         assert result["converged"] is True
         assert result["final_loss"] == pytest.approx(5.0, abs=0.2)
 
+    def test_noisy_short_run_is_not_converged_by_chance(self):
+        """A loss too noisy to measure must not pass just because the last
+        window happened to be no lower than the one before."""
+        rng = np.random.default_rng(0)
+        losses = 30000.0 + rng.normal(scale=15000.0, size=400)
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is False
+        assert result["standard_error"] > 1.0
+
     def test_non_finite_loss_is_not_converged(self):
         losses = np.full(1000, np.inf)
 
@@ -876,3 +888,127 @@ class TestAdviConvergence:
         assert len(reports) == 3
         assert "100/300" in reports[0]
         assert "improved by 100.33" in reports[1]
+
+
+# ── Scale handling (decimal growth rates) ───────────────────────────────────
+
+
+def _bridge_inputs(seed: int = 0):
+    """Small synthetic inputs for the XGBoost and bridge steps, in decimals."""
+    rng = np.random.default_rng(seed)
+    T, R, J = 60, 4, 2
+    Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+    macro = rng.normal(size=(T, 1))
+    y_uk = rng.normal(scale=0.005, size=T)
+    y_annual = np.full((T, R), np.nan)
+    q4_rows = np.arange(3, T, 4)
+    signal = sum(z.reshape(T // 4, 4, R).mean(axis=1) for z in Z_panel)
+    y_annual[q4_rows] = 0.02 * signal + rng.normal(scale=0.005, size=signal.shape)
+    return Z_panel, macro, y_uk, y_annual
+
+
+class TestScaleHandling:
+    def test_xgboost_learns_from_decimal_growth_rates(self):
+        """With targets of order 0.02 the regularisation must not flatten the
+        fit: predictions should vary and track the target."""
+        Z_panel, macro, _, y_annual = _bridge_inputs()
+
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        target = y_annual[3::4]
+        assert np.corrcoef(preds.ravel(), target.ravel())[0, 1] > 0.8
+        assert preds.std() > 0.5 * target.std()
+
+    def test_xgboost_predictions_scale_with_growth_units(self):
+        Z_panel, macro, _, y_annual = _bridge_inputs()
+
+        _, preds_decimal = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, preds_percent = train_xgboost_annual(Z_panel, macro, y_annual * 100)
+
+        np.testing.assert_allclose(preds_percent, preds_decimal * 100, rtol=1e-3)
+
+    def test_bridge_fit_does_not_depend_on_growth_units(self):
+        Z_panel, macro, y_uk, y_annual = _bridge_inputs()
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        signal_decimal, info_decimal = fit_bridge_equation(
+            y_annual, preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        signal_percent, info_percent = fit_bridge_equation(
+            y_annual * 100, preds * 100, Z_panel, y_uk * 100, macro, use_almon=False
+        )
+
+        assert info_percent["bridge_r2"] == pytest.approx(info_decimal["bridge_r2"])
+        np.testing.assert_allclose(signal_percent, signal_decimal * 100, rtol=1e-6)
+        # The ridge penalty must not wipe out a real relationship
+        assert info_decimal["bridge_r2"] > 0.5
+
+    def test_bridge_coefficients_reproduce_regression_predictions(self):
+        Z_panel, macro, y_uk, y_annual = _bridge_inputs()
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, info = fit_bridge_equation(
+            y_annual, preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        rng = np.random.default_rng(1)
+        X_new = rng.normal(size=(5, 1 + 1 + len(Z_panel)))
+
+        by_hand = (
+            X_new @ np.concatenate([[info["delta"]], info["betas"]]) + info["intercept"]
+        )
+
+        np.testing.assert_allclose(info["bridge_reg"].predict(X_new), by_hand)
+
+    def test_model_does_not_depend_on_macro_units(self):
+        """Rescaling and shifting a macro series must leave the model's
+        log-probability unchanged, since macro is z-scored internally."""
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 2
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+        macro = rng.normal(size=(T, M))
+        common = dict(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, K)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+        )
+
+        model = build_ambric_model(macro=macro, **common)
+        model_rescaled = build_ambric_model(macro=macro * 1000 + 50, **common)
+
+        point = model.initial_point()
+        assert model_rescaled.compile_logp()(point) == pytest.approx(
+            model.compile_logp()(point)
+        )
+
+    def test_growth_parameters_are_reported_in_decimal_units(self):
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 1
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, K)),
+            macro=rng.normal(size=(T, M)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+        )
+
+        deterministic_names = {v.name for v in model.deterministics}
+        assert {
+            "y_reg",
+            "sigma_eps",
+            "sigma_uk",
+            "sigma_ann",
+            "Lambda",
+            "Gamma",
+            "alpha_r",
+        }.issubset(deterministic_names)
+        prior = pm.sample_prior_predictive(
+            draws=500, model=model, var_names=["sigma_eps", "y_reg"], random_seed=0
+        ).prior
+        # Prior quarterly growth and its innovation scale are of the order of
+        # a few percent at most, not tens of percent.
+        assert float(prior["sigma_eps"].mean()) < 0.02
+        assert float(np.abs(prior["y_reg"]).mean()) < 0.1
