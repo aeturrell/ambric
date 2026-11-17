@@ -971,15 +971,21 @@ class TestScaleHandling:
         y_annual = np.full((T, R), np.nan)
         y_annual[7::4] = 0.02
         macro = rng.normal(size=(T, M))
-        common = dict(
-            y_uk=rng.normal(scale=0.005, size=T),
-            y_annual=y_annual,
-            factors=rng.normal(size=(T, K)),
-            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
-        )
+        y_uk = rng.normal(scale=0.005, size=T)
+        factors = rng.normal(size=(T, K))
+        bridge_signal = rng.normal(scale=0.005, size=(T, R))
 
-        model = build_ambric_model(macro=macro, **common)
-        model_rescaled = build_ambric_model(macro=macro * 1000 + 50, **common)
+        def _build(macro_in: np.ndarray) -> pm.Model:
+            return build_ambric_model(
+                y_uk=y_uk,
+                y_annual=y_annual,
+                factors=factors,
+                macro=macro_in,
+                bridge_signal=bridge_signal,
+            )
+
+        model = _build(macro)
+        model_rescaled = _build(macro * 1000 + 50)
 
         point = model.initial_point()
         assert model_rescaled.compile_logp()(point) == pytest.approx(
@@ -1012,7 +1018,7 @@ class TestScaleHandling:
         }.issubset(deterministic_names)
         prior = pm.sample_prior_predictive(
             draws=500, model=model, var_names=["sigma_eps", "y_reg"], random_seed=0
-        ).prior
+        )["prior"]
         # Prior quarterly growth and its innovation scale are of the order of
         # a few percent at most, not tens of percent.
         assert float(prior["sigma_eps"].mean()) < 0.02
@@ -1204,7 +1210,7 @@ class TestRegionWeights:
         )
         w_prior = pm.sample_prior_predictive(
             draws=2000, model=model, var_names=["w"], random_seed=0
-        ).prior["w"]
+        )["prior"]["w"]
 
         np.testing.assert_allclose(
             w_prior.mean(dim=("chain", "draw")).values, prior_mean, atol=0.005

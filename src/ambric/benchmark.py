@@ -71,7 +71,7 @@ def run_recovery_benchmark(
     # other modules at import time.
     from ambric import Ambric
 
-    df, truth = generate_realistic_simulated_data(  # ty: ignore[not-iterable]
+    df, truth = generate_realistic_simulated_data(
         T=T,
         R=R,
         J=J,

@@ -15,7 +15,7 @@ and the bridge signal jointly informing latent quarterly regional growth.
 Finally, estimation is done via variational inference.
 
 The core equation becomes
-y_{t,r} = phi_r * y_{t-1,r} + (1 - phi_r) * (Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r}) + epsilon_{t,r},
+y_{t,r} = phi_r * y_{t-1,r} + (1 - phi_r) * (alpha_r + Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r}) + epsilon_{t,r},
 where delta_r is estimated with a hierarchical shrinkage prior, allowing
 the model to learn the value of the XGBoost bridge signal per region.
 """
@@ -30,6 +30,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 from pathlib import Path
+from typing import cast
 
 import arviz as az
 import numpy as np
@@ -558,8 +559,12 @@ def _bridge_coefficients(
         ``reg.predict(X) == X @ coefficients + intercept``.
     """
     x_scaler, ridge = reg.regressor_[0], reg.regressor_[-1]
-    y_scale = float(reg.transformer_.scale_[0])
-    y_mean = float(reg.transformer_.mean_[0])
+    # _fit_bridge_ridge always uses a StandardScaler for the target.
+    y_scaler = cast(StandardScaler, reg.transformer_)
+    if y_scaler.scale_ is None or y_scaler.mean_ is None:
+        raise ValueError("The bridge regression's target scaler is not fitted.")
+    y_scale = float(np.ravel(y_scaler.scale_)[0])
+    y_mean = float(np.ravel(y_scaler.mean_)[0])
     coefs = ridge.coef_.ravel() * y_scale / x_scaler.scale_
     intercept = y_mean + y_scale * float(np.ravel(ridge.intercept_)[0])
     intercept -= float(np.sum(coefs * x_scaler.mean_))
@@ -950,8 +955,8 @@ def build_ambric_model(
         # --- Exogenous mean: intercept + factors + macro + bridge ---
         mu_exog = (
             alpha_r
-            + pt.dot(factors_latent, Lambda.T)  # ty: ignore[unresolved-attribute]
-            + pt.dot(macro_z, Gamma.T)  # ty: ignore[unresolved-attribute]
+            + pt.dot(factors_latent, Lambda.T)
+            + pt.dot(macro_z, Gamma.T)
             + bridge_data * delta_r  # ty: ignore[unsupported-operator]
         )
 
@@ -976,7 +981,7 @@ def build_ambric_model(
             sigma=PRIOR_SCALES["y_reg"] / GROWTH_SCALE,
             shape=(T, R),
         )
-        y_reg_free = GROWTH_SCALE * y_reg_raw
+        y_reg_free = GROWTH_SCALE * pt.as_tensor_variable(y_reg_raw)
         if region_q_on_q is not None:
             clamp_mask_np = (~np.isnan(region_q_on_q)).astype(np.float64)
             clamp_vals_np = np.where(
@@ -1002,8 +1007,8 @@ def build_ambric_model(
             * pt.sum(
                 (
                     (
-                        y_reg[1:]  # ty: ignore[not-subscriptable]
-                        - phi_r * y_reg[:-1]  # ty: ignore[not-subscriptable]
+                        y_reg[1:]
+                        - phi_r * y_reg[:-1]
                         - (1 - phi_r)  # ty: ignore[unsupported-operator]
                         * mu_exog[1:]
                     )
@@ -1018,14 +1023,12 @@ def build_ambric_model(
             "regional_init",
             -0.5
             * pt.sum(
-                ((y_reg[0] - mu_exog[0]) / sigma_eps)  # ty: ignore[not-subscriptable]
-                ** 2
-                + 2 * pt.log(sigma_eps)
+                ((y_reg[0] - mu_exog[0]) / sigma_eps) ** 2 + 2 * pt.log(sigma_eps)
             ),
         )
 
         # --- Constraint: UK Quarterly Growth ---
-        mu_uk = pt.sum(y_reg * w, axis=1)  # ty: ignore[unsupported-operator]
+        mu_uk = pt.sum(y_reg * w, axis=1)
         pm.StudentT("obs_uk", nu=nu_uk, mu=mu_uk, sigma=sigma_uk, observed=y_uk)
 
         # --- Constraint: Annual Regional Growth (temporal convolution) ---
@@ -1045,7 +1048,7 @@ def build_ambric_model(
 
         y_lags = [y_reg * OMEGA[0]]
         for j in range(1, n_lags + 1):
-            y_reg_trimmed = y_reg[:-j, :]  # ty: ignore[not-subscriptable]
+            y_reg_trimmed = y_reg[:-j, :]
             shifted = pt.concatenate([pt.zeros((j, R)), y_reg_trimmed], axis=0)
             y_lags.append(shifted * OMEGA[j])
 
@@ -1466,7 +1469,8 @@ class Ambric:
         """Saves the model trace to a NetCDF file.
 
         Args:
-            path (str | Path): Path to save the trace file
+            path (str | Path): Directory to save the trace in. The file is
+                named ``model_trace_{model_id}.nc``.
         """
         if self.trace is None:
             raise ValueError(
@@ -1780,7 +1784,10 @@ class Ambric:
     def economic_pulse_indicator(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table indicating the economic pulse.
 
-        Uses seasonally adjusted q-on-q growth estimates at quarterly frequency.
+        Takes the X-13 trend of each region's estimated quarterly index,
+        converts it to q-on-q growth in percent, and classifies each quarter
+        into growth bands with
+        :func:`~ambric.diagnostics.economic_pulse_indicator`.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1790,8 +1797,8 @@ class Ambric:
             ValueError: If model not fitted.
 
         Returns:
-            pd.DataFrame: Wide-format table with datetime index and one
-                column per region containing the classification.
+            pd.DataFrame: Long-format table with ``datetime``, ``region`` and
+                ``classification`` columns.
         """
         if self.trace is None:
             raise ValueError(
@@ -1819,8 +1826,8 @@ class Ambric:
     def point_estimates_q_on_4q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast point estimates by region.
 
-        Returns q-on-4q annual growth estimates (in percentage points,
-        rounded to 2 d.p.) at quarterly frequency.
+        Returns q-on-4q annual growth estimates (in percent, so 0.5 means
+        0.5%, rounded to 2 d.p.) at quarterly frequency.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1854,7 +1861,7 @@ class Ambric:
     def point_estimates_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast point estimates by region.
 
-        Returns q-on-q annual growth estimates (in percentage points,
+        Returns q-on-q growth estimates (in percent, so 0.5 means 0.5%,
         rounded to 2 d.p.) at quarterly frequency.
 
         Args:
@@ -1889,7 +1896,8 @@ class Ambric:
     def to_index_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast index.
 
-        Returns index to earliest data point at quarterly frequency.
+        Returns a quarterly index of each region's estimated level, set to
+        100 in the quarter before the first row.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When

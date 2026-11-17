@@ -1,4 +1,5 @@
 import uuid
+from typing import Literal, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -40,6 +41,49 @@ SIM_SIGMA_ANNUAL = 0.005  # annual regional measurement noise
 # =============================================================================
 # Functions
 # =============================================================================
+@overload
+def generate_realistic_simulated_data(
+    T: int = ...,
+    R: int = ...,
+    J: int = ...,
+    n_factors: int = ...,
+    n_macro: int = ...,
+    lag_qtrs: int = ...,
+    seed: int = ...,
+    w_true: npt.NDArray[np.float64] | None = ...,
+    return_truth: Literal[False] = ...,
+) -> pd.DataFrame: ...
+
+
+@overload
+def generate_realistic_simulated_data(
+    T: int = ...,
+    R: int = ...,
+    J: int = ...,
+    n_factors: int = ...,
+    n_macro: int = ...,
+    lag_qtrs: int = ...,
+    seed: int = ...,
+    w_true: npt.NDArray[np.float64] | None = ...,
+    *,
+    return_truth: Literal[True],
+) -> tuple[pd.DataFrame, dict]: ...
+
+
+@overload
+def generate_realistic_simulated_data(
+    T: int = ...,
+    R: int = ...,
+    J: int = ...,
+    n_factors: int = ...,
+    n_macro: int = ...,
+    lag_qtrs: int = ...,
+    seed: int = ...,
+    w_true: npt.NDArray[np.float64] | None = ...,
+    return_truth: bool = ...,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]: ...
+
+
 def generate_realistic_simulated_data(
     T: int = 130,
     R: int = 12,
@@ -289,7 +333,8 @@ def build_datetime_spine(
             f"No rows found for measure '{aggregate_measure}' in region "
             f"'{aggregation_region}'."
         )
-    quarter_numbers = spine.year * 4 + spine.quarter
+    as_series = spine.to_series()
+    quarter_numbers = (as_series.dt.year * 4 + as_series.dt.quarter).to_numpy()
     gaps = np.flatnonzero(np.diff(quarter_numbers) != 1)
     if len(gaps) > 0:
         first_gap = gaps[0]

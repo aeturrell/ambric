@@ -3,8 +3,6 @@ title: How to use AMBRIC
 jupyter: python3
 ---
 
-
-
 ```{python}
 #| echo: false
 import matplotlib_inline.backend_inline
@@ -19,9 +17,11 @@ from ambric import Ambric
 from ambric.utilities import generate_realistic_simulated_data
 ```
 
-As a user, we have to bring a few things to the party. The first, of course, is data, which we will simulate.
+As a user, we have to bring a few things to the party. The first, of course, is
+data, which we will simulate.
 
-Let's set-up some simulated data. We'll specify how many underlying factors are driving regional dynamics first.
+Let's set-up some simulated data. We'll specify how many underlying factors are
+driving regional dynamics first.
 
 ```{python}
 n_factors = 2
@@ -34,7 +34,10 @@ Data that are input into the model must have this structure:
 df.sample(10)
 ```
 
-The user must also specify the details of what the model will use. In particular, which regional variables, macroeconomic indicators (these should always have the aggregate region/top level geography as their region), and regional covariates to use. We'll just use all of these:
+The user must also specify the details of what the model will use. In
+particular, which regional variables, macroeconomic indicators (these should
+always have the aggregate region/top level geography as their region), and
+regional covariates to use. We'll just use all of these:
 
 ```{python}
 aggregation_region = "uk"
@@ -43,11 +46,24 @@ macro_names = [x for x in df["measure"].unique() if "macro" in x]
 region_covariate_names = [x for x in df["measure"].unique() if "regional_covar" in x]
 ```
 
-Growth rates must be decimals (`0.005` for 0.5%). Rows can be in any order. The quarterly growth series for the aggregate region must be complete, with no missing quarters, and so must the macro series. Regional data need rows only where a value exists: annual regional growth is given at year-end quarters, and other quarters can be left out or set to nan.
+Growth rates must be decimals (`0.005` for 0.5%). Rows can be in any order. The
+quarterly growth series for the aggregate region must be complete, with no
+missing quarters, and so must the macro series. Regional data need rows only
+where a value exists: annual regional growth is given at year-end quarters, and
+other quarters can be left out or set to nan.
 
-In a typical use case, you will have non-nan quarters of quarterly growth at the aggregate region (eg the UK) for which the regional data are nan. Those nans in the time period between is what we are nowcasting.
+In a typical use case, you will have non-nan quarters of quarterly growth at the
+aggregate region (eg the UK) for which the regional data are nan. Those nans in
+the time period between is what we are nowcasting.
 
-If you know each region's share of the national total (for example its share of output), pass it as `region_weights`, a dictionary keyed by region name. It centres the prior on the weights that turn regional growth into national growth. Without it, AMBRIC estimates the shares from the growth data, which is much less precise. The simulated regions are equally sized, so here we say so:
+If you know each region's share of the national total (for example its share of
+output), pass it as `region_weights`, a dictionary keyed by region name. It
+centres the prior on the weights that turn regional growth into national growth.
+Without it, AMBRIC estimates the shares from the growth data, which is much less
+precise. How tightly the weights are held to these shares is set by
+`region_weights_concentration` (larger is tighter; the default is 500 for
+supplied shares and 50 for estimated ones). The simulated regions are equally
+sized, so here we say so:
 
 ```{python}
 region_weights = {region: 1.0 for region in region_names}
@@ -67,7 +83,9 @@ amb = Ambric(
 amb
 ```
 
-Note that the model has specified all of its details, including that it sees that there are 6 rows of the regional data missing that will be estimated by the model. The model also tells us it isn't fitted, so let's sort that. We recommended using at least 100k iterations.
+Printing the model shows its dimensions (quarters, regions, macro series,
+regional indicators and factors) and the period it covers. It also tells us it
+isn't fitted, so let's sort that. We recommend using at least 100k iterations.
 
 ```{python}
 n_iterations = 200000
@@ -75,33 +93,53 @@ n_posterior_samples = 3000
 amb.fit(n_iterations, n_posterior_samples)
 ```
 
-That's it! It's done. While fitting, the log reports how the ADVI loss is improving, and warns at the end if it was still falling, which means more iterations are needed. You can also look at the loss path directly:
+That's it! It's done. While fitting, the log reports how the ADVI loss is
+improving, and warns at the end if it was still falling, which means more
+iterations are needed. You can also look at the loss path directly:
 
 ```{python}
 amb.plot_advi_convergence()
 ```
 
+`fit()` has a few other options:
+
+- `xgb_params`: a dictionary of XGBoost hyperparameters, overriding the
+  defaults.
+- `bridge_use_almon`: whether the MIDAS bridge equation estimates Almon
+  polynomial weights across the quarters (`True`, the default) or uses equal
+  weights.
+- `bridge_ridge_alpha`: the ridge penalty in the bridge equation (default 1.0).
+- `advi_log_every`: how many iterations between log lines reporting the ADVI
+  loss (default: a twentieth of the run).
+- `advi_convergence_tolerance`: the largest fall in mean loss between the last
+  two 5% windows of the run that still counts as converged (default 1.0).
+
 Now let's look at some results.
 
-First, our regional estimates of quarterly growth must be consistent with the observed national growth. We can check the implied vs the true growth at the national level.
+First, our regional estimates of quarterly growth must be consistent with the
+observed national growth. We can check the implied vs the true growth at the
+national level.
 
 ```{python}
 amb.plot_national_quarterly_vs_implied()
 ```
 
-Next let's look at what the regional growth (q on 4 q earlier) looks like for all regions.
+Next let's look at what the regional growth (q on 4 q earlier) looks like for
+all regions.
 
 ```{python}
 amb.plot_regional_annual_estimate()
 ```
 
-We can also look at the underlying quarterly regional growth estimates (the latent $y_{t,r}$):
+We can also look at the underlying quarterly regional growth estimates (the
+latent $y_{t,r}$):
 
 ```{python}
 amb.plot_estimated_regional_quarterly()
 ```
 
-And, if we want tables of the nowcasts, there's a built-in for that at either q-on-4q
+And, if we want tables of the nowcasts, there's a built-in for that at either
+q-on-4q (these tables are in percent, so `0.5` means 0.5%)
 
 ```{python}
 amb.point_estimates_q_on_4q().iloc[-3:, :]
@@ -113,19 +151,23 @@ or q-on-q:
 amb.point_estimates_q_on_q().iloc[-3:, :]
 ```
 
-These can be turned into a regional index, rebased to 100 at the start of the sample:
+These can be turned into a regional index, set to 100 in the quarter before the
+sample starts:
 
 ```{python}
 amb.to_index_q_on_q().iloc[-3:, :]
 ```
 
-For a less granular binned signal, `economic_pulse_indicator()` classifies each period into growth bands rather than just recession/expansion:
+For a less granular binned signal, `economic_pulse_indicator()` classifies each
+period into growth bands rather than just recession/expansion:
 
 ```{python}
 amb.economic_pulse_indicator().set_index(["region", "datetime"]).unstack(0).tail()
 ```
 
-There is also access to all of the internal data generated when the model runs. The raw Bayesian samples can be retrieved using `amb.trace`, while the full set of predictions and outturns are available through `amb.populate_results()`:
+There is also access to all of the internal data generated when the model runs.
+The raw Bayesian samples can be retrieved using `amb.trace`, while the full set
+of predictions and outturns are available through `amb.populate_results()`:
 
 ```{python}
 amb.populate_results()
@@ -133,7 +175,9 @@ amb.populate_results()
 
 ## Factor and macro loadings
 
-AMBRIC's hierarchical loadings — $\Lambda$ for the regional factors, $\Gamma$ for the macro covariates, and $\delta_r$ for the XGBoost bridge signal (see the README for the full specification) — can be inspected after fitting.
+AMBRIC's hierarchical loadings — $\Lambda$ for the regional factors, $\Gamma$
+for the macro covariates, and $\delta_r$ for the XGBoost bridge signal (see the
+README for the full specification) — can be inspected after fitting.
 
 ```{python}
 amb.assemble_loadings_data().head()
@@ -147,5 +191,95 @@ amb.plot_loadings_by_region()
 amb.plot_loadings_aggregate()
 ```
 
-If you want to persist the fitted posterior to disk for reuse, call `amb.save_trace('path/to/trace.nc')`.
+If you want to persist the fitted posterior to disk for reuse, call
+`amb.save_trace('path/to/folder')`. This writes `model_trace_<model id>.nc` into
+that folder, where the model id is the one shown when the model is printed.
 
+## Published quarterly regional data
+
+Some regions publish quarterly growth (for example Scotland's quarterly GDP),
+which is more timely than the annual regional release. Add it to the long
+dataframe as another measure, with the same
+`datetime | measure | region | value` columns and decimal growth rates, and pass
+the measure's name as `region_q_on_q_measure`. Coverage can be partial: you can
+supply some regions and some quarters. Where a value is supplied, the model's
+quarterly growth for that region and quarter is fixed to it, and it informs the
+other regions and quarters through the national and annual constraints and the
+model's dynamics.
+
+The simulated data don't include a quarterly regional series, so the example
+below (not run here) uses the simulation's true quarterly growth for the first
+region as if it were published:
+
+```{python}
+#| eval: false
+import pandas as pd
+
+df_sim, truth = generate_realistic_simulated_data(
+    n_factors=n_factors, R=12, return_truth=True
+)
+df_published_qoq = pd.DataFrame(
+    {
+        "datetime": truth["datetime"],
+        "measure": "region_q_on_q",
+        "region": "region_00",
+        "value": truth["y_reg_true"][:, 0],
+    }
+)
+df_with_qoq = pd.concat([df_sim, df_published_qoq], ignore_index=True)
+
+amb_qoq = Ambric(
+    df_with_qoq,
+    macro_names,
+    region_names,
+    region_covariate_names,
+    n_factors=n_factors,
+    region_weights=region_weights,
+    region_q_on_q_measure="region_q_on_q",
+)
+amb_qoq.fit(n_iterations, n_posterior_samples)
+```
+
+## Evaluating nowcasts out of sample
+
+`run_out_of_sample_exercise()` replays history to see how well the model would
+have done in real time. It starts from the first `init_chunk_size` quarters and
+moves forward `step_size` quarters at a time. At each step it hides the annual
+regional data for the last `lag_qtrs` quarters (the publication lag), fits the
+model, and keeps the nowcasts for those quarters alongside the outturns. If
+`region_q_on_q_measure` is given, published quarterly values for the last
+`lag_qtrs_qoq` quarters are hidden too. Each step is a full model fit, so this
+takes a while; the example is not run here.
+
+```{python}
+#| eval: false
+from ambric import run_out_of_sample_exercise
+from ambric.diagnostics import (
+    oos_q_on_4q_performance_table,
+    plot_out_of_sample_nowcasts,
+    plot_out_of_sample_rmse,
+)
+
+df_results = run_out_of_sample_exercise(
+    df,
+    macro_names,
+    region_names,
+    region_covariate_names,
+    n_factors=n_factors,
+    region_weights=region_weights,
+    init_chunk_size=100,
+    step_size=4,
+)
+```
+
+The results are in long format, with a `quarters_to_publication` column giving
+how far each nowcast was from the release of its outturn. They can be summarised
+by the root mean squared error at each horizon, the nowcasts against the
+outturns, and how often the nowcast got the direction of annual growth right:
+
+```{python}
+#| eval: false
+plot_out_of_sample_rmse(df_results, region_measure="gva_q_on_4q")
+plot_out_of_sample_nowcasts(df_results, region_measure="gva_q_on_4q")
+oos_q_on_4q_performance_table(df_results, region_measure="gva_q_on_4q")
+```

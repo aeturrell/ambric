@@ -17,11 +17,16 @@ dependencies = [
     "graphviz>=0.21",
     "loguru>=0.7.3",
     "matplotlib>=3.10.8",
+    "nbstripout>=0.9.0",
     "pandas>=2.3.3",
+    "pre-commit-hooks>=6.0.0",
     "pyarrow>=23.0.0",
     "pydemetra",
+    "pydoclint>=0.8.3",
     "pymc>=5.25.1",
+    "ruff>=0.15.2",
     "scikit-learn>=1.7.2",
+    "ty>=0.0.17",
     "xgboost>=3.2.0",
 ]
 
