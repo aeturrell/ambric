@@ -1,3 +1,4 @@
+*.bin
 # Package related files
 /build/
 .mypy_cache/
