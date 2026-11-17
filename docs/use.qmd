@@ -5,6 +5,7 @@ jupyter: python3
 
 ```{python}
 #| echo: false
+
 import matplotlib_inline.backend_inline
 
 matplotlib_inline.backend_inline.set_matplotlib_formats("svg")
@@ -213,6 +214,7 @@ region as if it were published:
 
 ```{python}
 #| eval: false
+
 import pandas as pd
 
 df_sim, truth = generate_realistic_simulated_data(
@@ -253,6 +255,7 @@ takes a while; the example is not run here.
 
 ```{python}
 #| eval: false
+
 from ambric import run_out_of_sample_exercise
 from ambric.diagnostics import (
     oos_q_on_4q_performance_table,
@@ -279,6 +282,7 @@ outturns, and how often the nowcast got the direction of annual growth right:
 
 ```{python}
 #| eval: false
+
 plot_out_of_sample_rmse(df_results, region_measure="gva_q_on_4q")
 plot_out_of_sample_nowcasts(df_results, region_measure="gva_q_on_4q")
 oos_q_on_4q_performance_table(df_results, region_measure="gva_q_on_4q")

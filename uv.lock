@@ -36,6 +36,7 @@ dev = [
     { name = "jupyter" },
     { name = "nbstripout" },
     { name = "nox" },
+    { name = "panache-cli" },
     { name = "pre-commit" },
     { name = "pre-commit-hooks" },
     { name = "pydoclint" },
@@ -77,6 +78,7 @@ dev = [
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "nbstripout", specifier = ">=0.8.1" },
     { name = "nox", specifier = ">=2024.10.9" },
+    { name = "panache-cli", specifier = ">=3.19.0" },
     { name = "pre-commit", specifier = ">=4.0.1" },
     { name = "pre-commit-hooks", specifier = ">=5.0.0" },
     { name = "pydoclint", specifier = ">=0.6.0" },
@@ -2018,6 +2020,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/65/ee/299d360cdc32edc7d2cf530f3accf79c4fca01e96ffc950d8a52213bd8e4/packaging-26.0.tar.gz", hash = "sha256:00243ae351a257117b6a241061796684b084ed1c516a08c48a3f7e147a9d80b4", size = 143416, upload-time = "2026-01-21T20:50:39.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/b9/c538f279a4e237a006a2c98387d081e9eb060d203d8ed34467cc0f0b9b53/packaging-26.0-py3-none-any.whl", hash = "sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529", size = 74366, upload-time = "2026-01-21T20:50:37.788Z" },
+]
+
+[[package]]
+name = "panache-cli"
+version = "3.19.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8b/34/3a0d45580e7cd8dc99ddfefe08640b908b683cf7fcd2e89e2d11d587f6bb/panache_cli-3.19.0.tar.gz", hash = "sha256:122c9783de762ddcdd45f51ef57dd215c40dde424c692e43b426766d07869e58", size = 1622955, upload-time = "2026-11-17T14:55:32.191Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/20/081bdab819f5b2e4e3cfa434d5fd4123d97d8e81f2dd2f6c2766f6462ec0/panache_cli-3.19.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:ce25486aedcf6a8a16ab22bafaac01385ced062c129d7191c815816053a46bf4", size = 8453174, upload-time = "2026-11-17T14:55:16.41Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/6a/f4eafcebda2cf4439ea37246332666ff042b8140992cf7c537a9549d270a/panache_cli-3.19.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:d6b6bcf909fabf98a29709ebd7b32f4db045e1e26e9c7b3bde8365b3878b544b", size = 8010063, upload-time = "2026-11-17T14:55:18.585Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/ac/668d54cd39ac59f09a4c147a604aebc901e6899d8e434b78cc33c9cd04b9/panache_cli-3.19.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b2bc288f686422a1af14f24d2ea61f51d3919fb162daa60e54a6dcb29babd89", size = 8217293, upload-time = "2026-11-17T14:55:20.2Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/a6/e5e797bdf454cfe2383871a374597cc6484e99180654f72a92c24a394651/panache_cli-3.19.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:512a2ef14832bc4412b56c141dd681d5ac4216fb9b10aaa7f0c4b209cfa3f412", size = 8723797, upload-time = "2026-11-17T14:55:22.012Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/1c/3d3a73583f75ca388eee9b278bdd1b66032a29fae3572084ea7b7e4fa563/panache_cli-3.19.0-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:9d37f96fa76995f779b6de448da37717819bee83ee488cad1c776f4c05bfc2bb", size = 8142079, upload-time = "2026-11-17T14:55:23.994Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/14/d8c0c85e2f1f8ca2773f56155d08e2401104dfcbcca80ce1074ae15bb142/panache_cli-3.19.0-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:0e86768d8299627aa87e589346080b449b5cf3f81e36e87ce9991cec3fb2e82b", size = 8935878, upload-time = "2026-11-17T14:55:26.051Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/3d/c44d7cb55144383f764f0245226b24612f6aff29d5eaf88bcf8565cdfcd3/panache_cli-3.19.0-py3-none-win_amd64.whl", hash = "sha256:b2c82474e48a07d254eb246e226c5429b5f3c400761705880f526beaddcd6a1b", size = 8971946, upload-time = "2026-11-17T14:55:28.282Z" },
+    { url = "https://files.pythonhosted.org/packages/43/a0/c9793c6469f4eb53f33290026a0c895c39b523d95e7f4c0034be67e76ceb/panache_cli-3.19.0-py3-none-win_arm64.whl", hash = "sha256:5bfe6d50596366bfff50d1dd2e2b96130a9ec4c208b9dc3691e9958b4928976d", size = 8270605, upload-time = "2026-11-17T14:55:30.212Z" },
 ]
 
 [[package]]

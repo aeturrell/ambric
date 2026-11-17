@@ -50,6 +50,7 @@ dev = [
     "ty>=0.0.14",
     "typeguard>=4.4.4",
     "great-docs[svg]>=0.10.0",
+    "panache-cli>=3.19.0",
 ]
 
 [tool.uv]
