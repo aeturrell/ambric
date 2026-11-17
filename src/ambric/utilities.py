@@ -395,6 +395,12 @@ def prep_data_for_model_run(
     """Expects a data frame in following format:
     datetime | measure | region | value
 
+    Every returned array is aligned to one sorted quarterly spine: the
+    quarters at which ``aggregate_measure`` is present for
+    ``aggregation_region``. The row order of ``df`` does not matter, macro
+    columns follow ``macro_names``, and regional columns follow
+    ``region_names``. Regional measures need rows only where a value exists;
+    other quarters become NaN.
 
     Args:
         df (pd.DataFrame): Long format dataframe with all data in
@@ -422,13 +428,6 @@ def prep_data_for_model_run(
             usual; supplied values fix the model's latent quarterly growth
             for that region and quarter (a hard clamp). Defaults to ``None``
             (no q-on-q observations — backwards compatible).
-
-    Every returned array is aligned to one sorted quarterly spine: the
-    quarters at which ``aggregate_measure`` is present for
-    ``aggregation_region``. The row order of ``df`` does not matter, macro
-    columns follow ``macro_names``, and regional columns follow
-    ``region_names``. Regional measures need rows only where a value exists;
-    other quarters become NaN.
 
     Raises:
         KeyError: If a required measure or region is absent from ``df``.
