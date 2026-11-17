@@ -15,7 +15,7 @@ and the bridge signal jointly informing latent quarterly regional growth.
 Finally, estimation is done via variational inference.
 
 The core equation becomes
-y_{t,r} = phi_r * y_{t-1,r} + (1 - phi_r) * (Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r}) + epsilon_{t,r},
+y_{t,r} = phi_r * y_{t-1,r} + (1 - phi_r) * (alpha_r + Lambda_r @ F_t + Gamma_r @ X_t + delta_r * s_{t,r}) + epsilon_{t,r},
 where delta_r is estimated with a hierarchical shrinkage prior, allowing
 the model to learn the value of the XGBoost bridge signal per region.
 """
@@ -30,6 +30,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 from pathlib import Path
+from typing import cast
 
 import arviz as az
 import numpy as np
@@ -40,6 +41,7 @@ import pymc as pm
 import pytensor.tensor as pt
 from loguru import logger
 from scipy.optimize import minimize
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.decomposition import FactorAnalysis
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
@@ -49,8 +51,11 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 from xgboost import XGBRegressor
 
 from ambric.diagnostics import (
+    AdviProgressLogger,
     assemble_loadings_data,
+    assess_advi_convergence,
     economic_pulse_indicator,
+    plot_advi_convergence,
     plot_current_nowcast,
     plot_estimated_regional_quarterly,
     plot_loadings_aggregate,
@@ -61,7 +66,17 @@ from ambric.diagnostics import (
     plot_single_region_annual_estimate,
     trace_to_series,
 )
-from ambric.utilities import OMEGA, gen_unique_id, prep_data_for_model_run
+from ambric.utilities import (
+    GROWTH_SCALE,
+    OMEGA,
+    PRIOR_SCALES,
+    build_datetime_spine,
+    estimate_region_weights,
+    first_q1_offset,
+    gen_unique_id,
+    normalise_region_weights,
+    prep_data_for_model_run,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -244,22 +259,55 @@ def extract_factors_from_panel(
 # =============================================================================
 
 
-def _aggregate_quarterly_to_annual(
-    X_quarterly: npt.NDArray[np.float64],
-) -> npt.NDArray[np.float64]:
-    """Average quarterly data to annual (groups of 4 quarters).
+def _n_complete_years(T: int, q1_offset: int = 0) -> int:
+    """Number of complete calendar years in T quarters.
 
     Args:
-        X_quarterly: Array of shape (T, P) where T is divisible by 4.
+        T: Number of quarterly rows.
+        q1_offset: Row index of the first calendar Q1 (0..3).
 
     Returns:
-        Array of shape (T//4, P) of annual averages.
+        Number of complete (Q1..Q4) calendar years.
+    """
+    if not 0 <= q1_offset <= 3:
+        raise ValueError(f"q1_offset must be between 0 and 3, got {q1_offset}.")
+    return max(T - q1_offset, 0) // 4
+
+
+def _complete_years_view(
+    X_quarterly: npt.NDArray[np.float64], q1_offset: int = 0
+) -> npt.NDArray[np.float64]:
+    """Reshape quarterly data to (n_years, 4, P) over complete calendar years.
+
+    Rows before the first Q1 and after the last Q4 are dropped.
+
+    Args:
+        X_quarterly: Array of shape (T, P).
+        q1_offset: Row index of the first calendar Q1 (0..3).
+
+    Returns:
+        Array of shape (n_years, 4, P).
     """
     T, P = X_quarterly.shape
-    n_complete_years = T // 4
-    T_use = n_complete_years * 4
-    X_trimmed = X_quarterly[:T_use]
-    return X_trimmed.reshape(n_complete_years, 4, P).mean(axis=1)
+    n_years = _n_complete_years(T, q1_offset)
+    return X_quarterly[q1_offset : q1_offset + 4 * n_years].reshape(n_years, 4, P)
+
+
+def _aggregate_quarterly_to_annual(
+    X_quarterly: npt.NDArray[np.float64],
+    q1_offset: int = 0,
+) -> npt.NDArray[np.float64]:
+    """Average quarterly data to annual (complete calendar years).
+
+    Args:
+        X_quarterly: Array of shape (T, P).
+        q1_offset: Row index of the first calendar Q1 (0..3). Rows before
+            it, and any incomplete final year, are dropped.
+
+    Returns:
+        Array of shape (n_years, P) of annual averages.
+    """
+    return _complete_years_view(X_quarterly, q1_offset).mean(axis=1)
 
 
 def train_xgboost_annual(
@@ -267,6 +315,7 @@ def train_xgboost_annual(
     macro: npt.NDArray[np.float64],
     y_annual: npt.NDArray[np.float64],
     xgb_params: dict | None = None,
+    q1_offset: int = 0,
 ) -> tuple[XGBRegressor, npt.NDArray[np.float64]]:
     """Train XGBoost to predict annual regional growth from annually-aggregated features.
 
@@ -275,48 +324,59 @@ def train_xgboost_annual(
     regional indicators Z_{j,r} and macro variables, aggregated to annual
     frequency by averaging across quarters.
 
+    Predictions for observed region-years are made leave-one-year-out, so
+    that nothing downstream is fitted to XGBoost's in-sample fit.
+
     Args:
         Z_panel: List of J arrays, each (T, R). Regional indicator panels.
         macro: (T, M) national macro series.
         y_annual: (T, R) annual growth, observed only at Q4 (rest NaN).
         xgb_params: Optional XGBoost hyperparameters.
+        q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
+            covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
 
     Returns:
         Tuple of (fitted XGBRegressor, annual predictions (n_years, R)).
+
+        The predictions are growth rates. For region-years with an observed
+        outturn they are out-of-fold: each year is predicted by a model
+        trained on all the other years. Region-years without an outturn are
+        predicted by the returned regressor, which is trained on every
+        observation.
+
+        The regressor is fitted to the standardised target; multiply its
+        predictions by ``model.target_scale_`` and add ``model.target_mean_``
+        to get growth rates. It also carries ``out_of_fold_rmse_``,
+        ``in_sample_rmse_``, ``out_of_fold_`` (False if only one year was
+        observed) and ``edge_year_preds_``: a pair of (R,) predictions for
+        the incomplete years before the first Q1 and after the last Q4, made
+        from the quarters available, or ``None`` where there is no such year.
     """
     T, R = y_annual.shape
     J = len(Z_panel)
     M = macro.shape[1]
-    n_years = T // 4
+    n_years = _n_complete_years(T, q1_offset)
 
-    macro_annual = _aggregate_quarterly_to_annual(macro)
-
-    # Build pooled training panel
-    X_rows = []
-    y_rows = []
-
+    # features[a, r] holds the annual-average indicators for region r in
+    # complete year a, followed by the annual-average macro series.
+    macro_annual = _aggregate_quarterly_to_annual(macro, q1_offset)
+    features = np.empty((n_years, R, J + M))
     for r in range(R):
         Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r)
+        features[:, r, :J] = _aggregate_quarterly_to_annual(Z_r, q1_offset)
+        features[:, r, J:] = macro_annual
+    q4_rows = q1_offset + 4 * np.arange(n_years) + 3
+    targets = y_annual[q4_rows] if n_years > 0 else np.empty((0, R))
+    observed = ~np.isnan(targets)
 
-        for a in range(n_years):
-            q4_idx = 4 * a + 3
-            if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
-                features = np.concatenate([Z_r_annual[a], macro_annual[a]])
-                X_rows.append(features)
-                y_rows.append(y_annual[q4_idx, r])
-
-    if not X_rows:
+    if not observed.any():
         raise ValueError(
             "No observed annual regional data available for XGBoost training. "
             "Ensure y_annual contains at least one non-NaN value at a Q4 index."
         )
 
-    X_train = np.array(X_rows)
-    y_train = np.array(y_rows)
-
     logger.info(
-        f"XGBoost: Training on {len(y_train)} region-year observations "
+        f"XGBoost: Training on {int(observed.sum())} region-year observations "
         f"({J + M} features: {J} regional indicators + {M} macro)."
     )
 
@@ -330,25 +390,86 @@ def train_xgboost_annual(
         reg_lambda=5.0,
         min_child_weight=3,
         random_state=42,
+        # The panel is small, so one thread is as fast as several and
+        # avoids stalls when other processes are using the CPU.
+        n_jobs=1,
     )
     if xgb_params is not None:
         default_params.update(xgb_params)
 
-    model = XGBRegressor(**default_params)
-    model.fit(X_train, y_train)
+    def _fit(train: npt.NDArray[np.bool_]) -> XGBRegressor:
+        """Fit to the region-years flagged in ``train`` (n_years, R)."""
+        y_train = targets[train]
+        # The regularisation settings act on the size of the target, so the
+        # target is standardised for fitting and predictions are converted
+        # back. The fit is then the same whatever units growth is in.
+        y_scale = float(y_train.std())
+        fitted = XGBRegressor(**default_params)
+        fitted.target_mean_ = float(y_train.mean())
+        fitted.target_scale_ = y_scale if y_scale > 0 else 1.0
+        fitted.fit(
+            features[train], (y_train - fitted.target_mean_) / fitted.target_scale_
+        )
+        return fitted
 
-    # Predict for all region-years
-    xgb_annual_preds = np.full((n_years, R), np.nan)
-    for r in range(R):
-        Z_r = np.column_stack([Z_panel[j][:, r] for j in range(J)])
-        Z_r_annual = _aggregate_quarterly_to_annual(Z_r)
-        for a in range(n_years):
-            features = np.concatenate([Z_r_annual[a], macro_annual[a]])
-            xgb_annual_preds[a, r] = model.predict(features.reshape(1, -1))[0]
+    def _predict(
+        fitted: XGBRegressor, X: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        return fitted.predict(X) * fitted.target_scale_ + fitted.target_mean_
 
-    train_preds = model.predict(X_train)
-    rmse = np.sqrt(np.mean((y_train - train_preds) ** 2))
-    logger.info(f"XGBoost: In-sample RMSE = {rmse:.6f}")
+    # The model trained on every observation is used only where there is no
+    # outturn: unpublished years, and the incomplete years at either end.
+    model = _fit(observed)
+    in_sample_preds = _predict(model, features.reshape(-1, J + M)).reshape(n_years, R)
+    xgb_annual_preds = in_sample_preds.copy()
+
+    # Where an outturn exists, the prediction comes from a model that never
+    # saw that year (leave-one-year-out). The bridge equation is fitted to
+    # these predictions, so it learns how reliable XGBoost is out of sample
+    # rather than how well it can reproduce its own training data.
+    observed_years = np.flatnonzero(observed.any(axis=1))
+    out_of_fold = len(observed_years) > 1
+    if out_of_fold:
+        for a in observed_years:
+            train = observed.copy()
+            train[a] = False
+            fold_model = _fit(train)
+            xgb_annual_preds[a, observed[a]] = _predict(
+                fold_model, features[a, observed[a]]
+            )
+    else:
+        logger.warning(
+            "XGBoost: only one year of annual data is observed, so "
+            "out-of-fold predictions are not possible; using in-sample "
+            "predictions for that year."
+        )
+
+    def _rmse(preds: npt.NDArray[np.float64]) -> float:
+        return float(np.sqrt(np.mean((targets - preds)[observed] ** 2)))
+
+    model.in_sample_rmse_ = _rmse(in_sample_preds)
+    model.out_of_fold_rmse_ = _rmse(xgb_annual_preds) if out_of_fold else float("nan")
+    model.out_of_fold_ = out_of_fold
+    logger.info(
+        f"XGBoost: out-of-fold (leave-one-year-out) RMSE = "
+        f"{model.out_of_fold_rmse_:.6f}; in-sample RMSE = {model.in_sample_rmse_:.6f}"
+    )
+
+    # Incomplete years at the start and end of the sample: predict from the
+    # average of the quarters available so far.
+    def _partial_year(rows: slice) -> npt.NDArray[np.float64] | None:
+        if len(range(*rows.indices(T))) == 0:
+            return None
+        X = np.empty((R, J + M))
+        for r in range(R):
+            X[r, :J] = [Z_panel[j][rows, r].mean() for j in range(J)]
+            X[r, J:] = macro[rows].mean(axis=0)
+        return _predict(model, X)
+
+    model.edge_year_preds_ = (
+        _partial_year(slice(0, q1_offset)),
+        _partial_year(slice(q1_offset + 4 * n_years, T)),
+    )
 
     return model, xgb_annual_preds
 
@@ -381,24 +502,73 @@ def _almon_weights(theta1: float, theta2: float, n_lags: int = 4) -> npt.NDArray
 def _apply_midas_weights(
     X_quarterly: npt.NDArray[np.float64],
     weights: npt.NDArray[np.float64],
+    q1_offset: int = 0,
 ) -> npt.NDArray[np.float64]:
     """Apply MIDAS weights to quarterly data to get annual weighted aggregates.
 
-    For each year a with quarters q=0..3 (Q1..Q4):
-        X_annual[a] = sum_{q=0}^{3} w_q * X_{4a+q}
+    For each complete calendar year a with quarters q=0..3 (Q1..Q4):
+        X_annual[a] = sum_{q=0}^{3} w_q * X_{q1_offset+4a+q}
 
     Args:
         X_quarterly: (T, P) quarterly data.
         weights: (4,) MIDAS weights.
+        q1_offset: Row index of the first calendar Q1 (0..3).
 
     Returns:
         (n_years, P) weighted annual aggregates.
     """
-    T, P = X_quarterly.shape
-    n_years = T // 4
-    T_use = n_years * 4
-    X_reshaped = X_quarterly[:T_use].reshape(n_years, 4, P)
+    X_reshaped = _complete_years_view(X_quarterly, q1_offset)
     return np.sum(X_reshaped * weights[np.newaxis, :, np.newaxis], axis=1)
+
+
+def _fit_bridge_ridge(
+    X: npt.NDArray[np.float64], y: npt.NDArray[np.float64], ridge_alpha: float
+) -> TransformedTargetRegressor:
+    """Fit the bridge ridge regression on standardised features and target.
+
+    Standardising makes the ridge penalty act the same way whatever units
+    the features and growth rates are in. The returned regressor predicts in
+    the original units of ``y``.
+
+    Args:
+        X: (n, P) features.
+        y: (n,) target.
+        ridge_alpha: Ridge regularisation strength (on standardised data).
+
+    Returns:
+        Fitted regressor.
+    """
+    reg = TransformedTargetRegressor(
+        regressor=make_pipeline(StandardScaler(), Ridge(alpha=ridge_alpha)),
+        transformer=StandardScaler(),
+    )
+    reg.fit(X, y)
+    return reg
+
+
+def _bridge_coefficients(
+    reg: TransformedTargetRegressor,
+) -> tuple[npt.NDArray[np.float64], float]:
+    """Coefficients and intercept of a fitted bridge regression in original units.
+
+    Args:
+        reg: Regressor returned by :func:`_fit_bridge_ridge`.
+
+    Returns:
+        Tuple of (coefficients (P,), intercept) such that
+        ``reg.predict(X) == X @ coefficients + intercept``.
+    """
+    x_scaler, ridge = reg.regressor_[0], reg.regressor_[-1]
+    # _fit_bridge_ridge always uses a StandardScaler for the target.
+    y_scaler = cast(StandardScaler, reg.transformer_)
+    if y_scaler.scale_ is None or y_scaler.mean_ is None:
+        raise ValueError("The bridge regression's target scaler is not fitted.")
+    y_scale = float(np.ravel(y_scaler.scale_)[0])
+    y_mean = float(np.ravel(y_scaler.mean_)[0])
+    coefs = ridge.coef_.ravel() * y_scale / x_scaler.scale_
+    intercept = y_mean + y_scale * float(np.ravel(ridge.intercept_)[0])
+    intercept -= float(np.sum(coefs * x_scaler.mean_))
+    return coefs, intercept
 
 
 def fit_bridge_equation(
@@ -409,6 +579,11 @@ def fit_bridge_equation(
     macro: npt.NDArray[np.float64],
     use_almon: bool = True,
     ridge_alpha: float = 1.0,
+    q1_offset: int = 0,
+    xgb_edge_preds: tuple[
+        npt.NDArray[np.float64] | None, npt.NDArray[np.float64] | None
+    ]
+    | None = None,
 ) -> tuple[npt.NDArray[np.float64], dict]:
     """Fit bridge equation and produce quarterly signal s_{t,r}.
 
@@ -431,14 +606,21 @@ def fit_bridge_equation(
         y_uk: (T,) UK quarterly growth.
         macro: (T, M) macro series.
         use_almon: Estimate Almon polynomial weights vs equal weights.
-        ridge_alpha: Ridge regularisation strength.
+        ridge_alpha: Ridge regularisation strength, applied to standardised
+            features and target so it does not depend on their units.
+        q1_offset: Row index of the first calendar Q1 (0..3). Year ``a``
+            covers rows ``q1_offset + 4a`` to ``q1_offset + 4a + 3``.
+        xgb_edge_preds: Optional pair of (R,) XGBoost annual predictions for
+            the incomplete years before the first Q1 and after the last Q4
+            (``None`` for either if absent). Without it, quarters in those
+            years use the prediction for the nearest complete year.
 
     Returns:
         Tuple of (quarterly_signal (T, R), bridge_info dict).
     """
     T, R = y_annual.shape
     J = len(Z_panel)
-    n_years = T // 4
+    n_years = _n_complete_years(T, q1_offset)
     # P = 1 + J  # y_uk + J regional indicators
 
     def _build_quarterly_indicators_for_region(r: int) -> npt.NDArray:
@@ -459,10 +641,10 @@ def fit_bridge_equation(
             y_rows = []
             for r in range(R):
                 Q_r = _build_quarterly_indicators_for_region(r)
-                Q_r_annual = _apply_midas_weights(Q_r, weights)
+                Q_r_annual = _apply_midas_weights(Q_r, weights, q1_offset)
                 for a in range(n_years):
-                    q4_idx = 4 * a + 3
-                    if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
+                    q4_idx = q1_offset + 4 * a + 3
+                    if not np.isnan(y_annual[q4_idx, r]):
                         row = np.concatenate([[xgb_annual_preds[a, r]], Q_r_annual[a]])
                         X_rows.append(row)
                         y_rows.append(y_annual[q4_idx, r])
@@ -470,8 +652,7 @@ def fit_bridge_equation(
             X = np.array(X_rows)
             y = np.array(y_rows)
 
-            reg = Ridge(alpha=ridge_alpha, fit_intercept=True)
-            reg.fit(X, y)
+            reg = _fit_bridge_ridge(X, y, ridge_alpha)
             y_hat = reg.predict(X)
             ss_res = np.sum((y - y_hat) ** 2)
             ss_tot = np.sum((y - y.mean()) ** 2)
@@ -504,10 +685,10 @@ def fit_bridge_equation(
 
     for r in range(R):
         Q_r = _build_quarterly_indicators_for_region(r)
-        Q_r_annual = _apply_midas_weights(Q_r, midas_weights)
+        Q_r_annual = _apply_midas_weights(Q_r, midas_weights, q1_offset)
         for a in range(n_years):
-            q4_idx = 4 * a + 3
-            if q4_idx < T and not np.isnan(y_annual[q4_idx, r]):
+            q4_idx = q1_offset + 4 * a + 3
+            if not np.isnan(y_annual[q4_idx, r]):
                 row = np.concatenate([[xgb_annual_preds[a, r]], Q_r_annual[a]])
                 X_bridge_rows.append(row)
                 y_bridge_rows.append(y_annual[q4_idx, r])
@@ -521,8 +702,7 @@ def fit_bridge_equation(
     X_bridge = np.array(X_bridge_rows)
     y_bridge = np.array(y_bridge_rows)
 
-    bridge_reg = Ridge(alpha=ridge_alpha, fit_intercept=True)
-    bridge_reg.fit(X_bridge, y_bridge)
+    bridge_reg = _fit_bridge_ridge(X_bridge, y_bridge, ridge_alpha)
 
     y_hat_bridge = bridge_reg.predict(X_bridge)
     bridge_rmse = np.sqrt(np.mean((y_bridge - y_hat_bridge) ** 2))
@@ -530,24 +710,40 @@ def fit_bridge_equation(
     ss_tot = np.sum((y_bridge - y_bridge.mean()) ** 2)
     bridge_r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    delta = bridge_reg.coef_[0]
-    betas = bridge_reg.coef_[1:]
-    intercept = bridge_reg.intercept_
+    coefs, intercept = _bridge_coefficients(bridge_reg)
+    delta = coefs[0]
+    betas = coefs[1:]
 
-    logger.info(f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f}")
+    logger.info(
+        f"Bridge: R² = {bridge_r2:.4f}, RMSE = {bridge_rmse:.6f} "
+        f"(fitted to the XGBoost predictions it was given; these are "
+        f"out-of-fold when they come from train_xgboost_annual)"
+    )
     logger.debug(f"Bridge: delta (XGBoost loading) = {delta:.4f}")
     logger.debug(f"Bridge: intercept = {intercept:.4f}")
 
     # --- Construct quarterly signal s_{t,r} ---
     quarterly_signal = np.zeros((T, R))
 
+    first_edge, last_edge = (
+        xgb_edge_preds if xgb_edge_preds is not None else (None, None)
+    )
     for r in range(R):
         Q_r = _build_quarterly_indicators_for_region(r)
         for t in range(T):
-            a = min(t // 4, n_years - 1)
-            q = t % 4
+            year = (t - q1_offset) // 4
+            q = (t - q1_offset) % 4
+            # Quarters outside the complete years use the prediction made
+            # for their own incomplete year if supplied, otherwise that of
+            # the nearest complete year.
+            if year < 0 and first_edge is not None:
+                xgb_annual = first_edge[r]
+            elif year >= n_years and last_edge is not None:
+                xgb_annual = last_edge[r]
+            else:
+                xgb_annual = xgb_annual_preds[min(max(year, 0), n_years - 1), r]
 
-            xgb_component = (delta / 4.0) * xgb_annual_preds[a, r]
+            xgb_component = (delta / 4.0) * xgb_annual
             indicator_component = np.sum(betas * midas_weights[q] * Q_r[t])
             quarterly_signal[t, r] = (
                 (intercept / 4.0) + xgb_component + indicator_component
@@ -586,21 +782,29 @@ def build_ambric_model(
     macro: npt.NDArray[np.float64],
     bridge_signal: npt.NDArray[np.float64],
     region_q_on_q: npt.NDArray[np.float64] | None = None,
+    weight_prior_mean: npt.NDArray[np.float64] | None = None,
+    weight_prior_concentration: float = 50.0,
 ) -> pm.model.core.Model:
     """Build the AMBRIC Bayesian state-space model.
 
     The exogenous mean for latent regional growth is:
 
-        mu_exog[t,r] = Lambda[r] @ F[t] + Gamma[r] @ X[t] + delta_r * s[t,r]
+        mu_exog[t,r] = alpha_r + Lambda[r] @ F[t] + Gamma[r] @ X[t] + delta_r * s[t,r]
 
-    where s[t,r] is the quarterly bridge signal from XGBoost + MIDAS.
-    delta_r has a hierarchical shrinkage prior centred at zero.
+    where s[t,r] is the quarterly bridge signal from XGBoost + MIDAS and
+    X[t] are the macro series, z-scored inside the model. delta_r has a
+    hierarchical shrinkage prior centred at zero.
+
+    Growth rates are decimals (``0.005`` for 0.5%). Prior scales for the
+    growth-unit parameters are in :data:`ambric.utilities.PRIOR_SCALES`;
+    each is sampled as a unit-scale ``*_raw`` variable and rescaled, so the
+    named parameters in the posterior are in decimal growth units.
 
     Args:
-        y_uk: UK quarterly growth rates, shape (T,).
-        y_annual: Regional annual growth rates, shape (T, R).
+        y_uk: UK quarterly growth rates (decimal), shape (T,).
+        y_annual: Regional annual growth rates (decimal), shape (T, R).
         factors: Extracted factors, shape (T, K).
-        macro: Macro UK series, shape (T, M).
+        macro: Macro UK series in any units, shape (T, M).
         bridge_signal: Quarterly bridge signal, shape (T, R).
         region_q_on_q: Optional published quarterly regional growth rates,
             shape ``(T, R)`` with NaN in unobserved cells. Values must be
@@ -614,6 +818,17 @@ def build_ambric_model(
             neighbours rather than competing with them through a
             likelihood term. Defaults to ``None`` (no clamp — backwards
             compatible).
+        weight_prior_mean: Prior mean of the regional weights ``w`` that
+            aggregate regional growth to national growth, shape ``(R,)``,
+            summing to one. Defaults to equal weights.
+        weight_prior_concentration: How tightly the prior holds ``w`` to its
+            mean. ``w ~ Dirichlet(concentration * mean)``, so the prior
+            standard deviation of ``w_r`` is
+            ``sqrt(mean_r * (1 - mean_r) / (concentration + 1))``.
+
+    Raises:
+        ValueError: If ``weight_prior_mean`` has the wrong shape or
+            ``weight_prior_concentration`` is not positive.
 
     Returns:
         PyMC model object.
@@ -622,22 +837,80 @@ def build_ambric_model(
     _, M = macro.shape
     _, R = y_annual.shape
 
+    if weight_prior_mean is None:
+        weight_prior_mean = np.full(R, 1.0 / R)
+    weight_prior_mean = np.asarray(weight_prior_mean, dtype=np.float64)
+    if weight_prior_mean.shape != (R,):
+        raise ValueError(
+            f"weight_prior_mean must have shape ({R},), got {weight_prior_mean.shape}."
+        )
+    if weight_prior_concentration <= 0:
+        raise ValueError("weight_prior_concentration must be positive.")
+    # A Dirichlet needs strictly positive parameters, so a region whose
+    # prior weight is zero is given a small one.
+    weight_prior_mean = np.maximum(weight_prior_mean, 0.1 / R)
+    weight_prior_mean = weight_prior_mean / weight_prior_mean.sum()
+
     logger.info("Building AMBRIC model:")
     logger.debug(f"   {K} factors, {M} macro series, {T} quarters, {R} regions")
     logger.debug(f"   Bridge signal: shape {bridge_signal.shape}")
 
+    # Macro series arrive in arbitrary units, so they enter the model
+    # z-scored: Gamma is then the effect on growth of a one standard
+    # deviation move, and its prior does not depend on the user's units.
+    macro_sd = macro.std(axis=0)
+    macro_z = (macro - macro.mean(axis=0)) / np.where(macro_sd > 0, macro_sd, 1.0)
+
+    # Growth rates are decimals (0.005 for 0.5%). Every growth-scale
+    # parameter is sampled as a unit-scale variable (suffix ``_raw``) and
+    # multiplied by its prior scale, so the optimiser works with numbers of
+    # order one. The named parameters below are in decimal growth units.
+    def _scaled(name: str, prior_scale: float, raw):  # noqa: ANN001, ANN202
+        return pm.Deterministic(name, prior_scale * raw)
+
     with pm.Model() as model:
         # --- Hierarchical factor loadings ---
-        Lambda_mu = pm.Normal("Lambda_mu", mu=0, sigma=0.5, shape=K)
-        Lambda_sigma = pm.HalfNormal("Lambda_sigma", sigma=0.2, shape=K)
-        Lambda = pm.Normal("Lambda", mu=Lambda_mu, sigma=Lambda_sigma, shape=(R, K))
+        Lambda_mu = _scaled(
+            "Lambda_mu",
+            PRIOR_SCALES["Lambda_mu"],
+            pm.Normal("Lambda_mu_raw", mu=0, sigma=1, shape=K),
+        )
+        Lambda_sigma = _scaled(
+            "Lambda_sigma",
+            PRIOR_SCALES["Lambda_sigma"],
+            pm.HalfNormal("Lambda_sigma_raw", sigma=1, shape=K),
+        )
+        Lambda = pm.Deterministic(
+            "Lambda",
+            Lambda_mu + Lambda_sigma * pm.Normal("Lambda_raw", 0, 1, shape=(R, K)),
+        )
 
         # --- Hierarchical macro loadings ---
-        Gamma_mu = pm.Normal("Gamma_mu", mu=0, sigma=0.5, shape=M)
-        Gamma_sigma = pm.HalfNormal("Gamma_sigma", sigma=0.15, shape=M)
-        Gamma = pm.Normal("Gamma", mu=Gamma_mu, sigma=Gamma_sigma, shape=(R, M))
+        Gamma_mu = _scaled(
+            "Gamma_mu",
+            PRIOR_SCALES["Gamma_mu"],
+            pm.Normal("Gamma_mu_raw", mu=0, sigma=1, shape=M),
+        )
+        Gamma_sigma = _scaled(
+            "Gamma_sigma",
+            PRIOR_SCALES["Gamma_sigma"],
+            pm.HalfNormal("Gamma_sigma_raw", sigma=1, shape=M),
+        )
+        Gamma = pm.Deterministic(
+            "Gamma",
+            Gamma_mu + Gamma_sigma * pm.Normal("Gamma_raw", 0, 1, shape=(R, M)),
+        )
+
+        # --- Regional mean growth ---
+        # Macro series are centred, so average growth needs its own term.
+        alpha_r = _scaled(
+            "alpha_r",
+            PRIOR_SCALES["alpha_r"],
+            pm.Normal("alpha_r_raw", mu=0, sigma=1, shape=R),
+        )
 
         # --- Hierarchical bridge signal loading ---
+        # The bridge signal is already in growth units, so delta is unitless.
         delta_mu = pm.Normal("delta_mu", mu=0, sigma=0.3)
         delta_sigma = pm.HalfNormal("delta_sigma", sigma=0.15)
         delta_r = pm.Normal("delta_r", mu=delta_mu, sigma=delta_sigma, shape=R)
@@ -645,9 +918,21 @@ def build_ambric_model(
         bridge_data = pm.Data("bridge_signal", bridge_signal)
 
         # --- Noise parameters ---
-        sigma_eps = pm.HalfNormal("sigma_eps", sigma=0.1, shape=R)
-        sigma_uk = pm.HalfNormal("sigma_uk", sigma=0.01)
-        sigma_ann = pm.HalfNormal("sigma_ann", sigma=0.2, shape=R)
+        sigma_eps = _scaled(
+            "sigma_eps",
+            PRIOR_SCALES["sigma_eps"],
+            pm.HalfNormal("sigma_eps_raw", sigma=1, shape=R),
+        )
+        sigma_uk = _scaled(
+            "sigma_uk",
+            PRIOR_SCALES["sigma_uk"],
+            pm.HalfNormal("sigma_uk_raw", sigma=1),
+        )
+        sigma_ann = _scaled(
+            "sigma_ann",
+            PRIOR_SCALES["sigma_ann"],
+            pm.HalfNormal("sigma_ann_raw", sigma=1, shape=R),
+        )
 
         # --- Factor AR(1) dynamics ---
         phi_f = pm.Normal("phi_f", 0.7, 0.1, shape=K)
@@ -667,16 +952,22 @@ def build_ambric_model(
         sigma_exog = pm.HalfNormal("sigma_exog", sigma=0.2, shape=K)
         pm.Normal("obs_factors", mu=factors_latent, sigma=sigma_exog, observed=factors)
 
-        # --- Exogenous mean: factors + macro + bridge ---
+        # --- Exogenous mean: intercept + factors + macro + bridge ---
         mu_exog = (
-            pt.dot(factors_latent, Lambda.T)  # ty: ignore[unresolved-attribute]
-            + pt.dot(macro, Gamma.T)  # ty: ignore[unresolved-attribute]
+            alpha_r
+            + pt.dot(factors_latent, Lambda.T)
+            + pt.dot(macro_z, Gamma.T)
             + bridge_data * delta_r  # ty: ignore[unsupported-operator]
         )
 
         # --- Regional weights for UK aggregation ---
-        prior_weights = [1 / R for _ in range(R)]
-        w = pm.Normal("w", mu=prior_weights, sigma=0.01, shape=R)
+        # Positive and summing to one, centred on the prior shares.
+        # Held as data rather than a constant: with a constant, equal
+        # shares trip a PyTensor graph rewrite that then logs an error.
+        w_prior_alpha = pm.Data(
+            "w_prior_alpha", weight_prior_concentration * weight_prior_mean
+        )
+        w = pm.Dirichlet("w", a=w_prior_alpha, shape=R)
 
         # --- Degrees of freedom ---
         nu_uk = pm.Gamma("nu_uk", alpha=6, beta=1)
@@ -684,6 +975,13 @@ def build_ambric_model(
 
         # --- Regional AR(1) dynamics ---
         phi_r = pm.Normal("phi_r", mu=0.5, sigma=0.15, shape=R)
+        y_reg_raw = pm.Normal(
+            "y_reg_raw",
+            mu=0,
+            sigma=PRIOR_SCALES["y_reg"] / GROWTH_SCALE,
+            shape=(T, R),
+        )
+        y_reg_free = GROWTH_SCALE * pt.as_tensor_variable(y_reg_raw)
         if region_q_on_q is not None:
             clamp_mask_np = (~np.isnan(region_q_on_q)).astype(np.float64)
             clamp_vals_np = np.where(
@@ -691,7 +989,6 @@ def build_ambric_model(
             ).astype(np.float64)
             clamp_mask = pm.Data("region_qoq_mask", clamp_mask_np)
             clamp_vals = pm.Data("region_qoq_values", clamp_vals_np)
-            y_reg_free = pm.Normal("y_reg_free", mu=0, sigma=1, shape=(T, R))
             y_reg = pm.Deterministic(
                 "y_reg",
                 clamp_mask * clamp_vals  # ty: ignore[unsupported-operator]
@@ -702,7 +999,7 @@ def build_ambric_model(
                 f"region-quarter cells from region_q_on_q."
             )
         else:
-            y_reg = pm.Normal("y_reg", mu=0, sigma=1, shape=(T, R))
+            y_reg = pm.Deterministic("y_reg", y_reg_free)
 
         pm.Potential(
             "regional_ar_prior",
@@ -710,8 +1007,8 @@ def build_ambric_model(
             * pt.sum(
                 (
                     (
-                        y_reg[1:]  # ty: ignore[not-subscriptable]
-                        - phi_r * y_reg[:-1]  # ty: ignore[not-subscriptable]
+                        y_reg[1:]
+                        - phi_r * y_reg[:-1]
                         - (1 - phi_r)  # ty: ignore[unsupported-operator]
                         * mu_exog[1:]
                     )
@@ -726,25 +1023,42 @@ def build_ambric_model(
             "regional_init",
             -0.5
             * pt.sum(
-                ((y_reg[0] - mu_exog[0]) / sigma_eps)  # ty: ignore[not-subscriptable]
-                ** 2
+                ((y_reg[0] - mu_exog[0]) / sigma_eps) ** 2 + 2 * pt.log(sigma_eps)
             ),
         )
 
         # --- Constraint: UK Quarterly Growth ---
-        mu_uk = pt.sum(y_reg * w, axis=1)  # ty: ignore[unsupported-operator]
+        mu_uk = pt.sum(y_reg * w, axis=1)
         pm.StudentT("obs_uk", nu=nu_uk, mu=mu_uk, sigma=sigma_uk, observed=y_uk)
 
         # --- Constraint: Annual Regional Growth (temporal convolution) ---
+        # Annual growth at row t needs quarterly growth back to row t-6. For
+        # the first rows that window is incomplete, so observations there
+        # cannot be matched to a full sum and are left out of the likelihood.
+        n_lags = len(OMEGA) - 1
+        y_annual_obs = np.array(y_annual, dtype=np.float64, copy=True)
+        n_early = int(np.sum(~np.isnan(y_annual_obs[:n_lags])))
+        if n_early > 0:
+            logger.info(
+                f"{n_early} annual observations fall in the first {n_lags} "
+                f"quarters, before a full lag window is available; excluding "
+                f"them from the annual constraint."
+            )
+            y_annual_obs[:n_lags] = np.nan
+
         y_lags = [y_reg * OMEGA[0]]
-        for j in range(1, 7):
-            y_reg_trimmed = y_reg[:-j, :]  # ty: ignore[not-subscriptable]
+        for j in range(1, n_lags + 1):
+            y_reg_trimmed = y_reg[:-j, :]
             shifted = pt.concatenate([pt.zeros((j, R)), y_reg_trimmed], axis=0)
             y_lags.append(shifted * OMEGA[j])
 
         mu_annual = pt.sum(pt.stack(y_lags), axis=0)
         pm.StudentT(
-            "obs_annual", nu=nu_ann, mu=mu_annual, sigma=sigma_ann, observed=y_annual
+            "obs_annual",
+            nu=nu_ann,
+            mu=mu_annual,
+            sigma=sigma_ann,
+            observed=y_annual_obs,
         )
 
     return model
@@ -773,6 +1087,8 @@ class Ambric:
         aggregation_region: str = "uk",
         region_measure: str = "gva_q_on_4q",
         region_q_on_q_measure: str | None = None,
+        region_weights: dict[str, float] | None = None,
+        region_weights_concentration: float | None = None,
     ):
         """Initialise the ambric model.
 
@@ -805,10 +1121,24 @@ class Ambric:
                 Partial coverage is fully supported: you may supply rows for
                 only one or two regions, and only for some quarters. Missing
                 region/quarter combinations (no row, or NaN value) are
-                automatically masked out of the likelihood — uncovered
-                regions and quarters contribute nothing to this term, and
-                the model fits normally. Defaults to ``None`` (no q-on-q
-                observations — backwards compatible).
+                estimated as usual. Where a value is supplied, the model's
+                latent quarterly growth for that region and quarter is
+                fixed to it (a hard clamp, not a noisy observation), and
+                it then informs neighbouring quarters and regions through
+                the model's dynamics and constraints. Defaults to ``None``
+                (no q-on-q observations — backwards compatible).
+            region_weights: Optional weight of each region in the national
+                aggregate, keyed by region name, e.g. each region's share
+                of national output. They need not sum to one. They set the
+                centre of the prior on the weights ``w`` that turn regional
+                growth into national growth. When ``None``, the centre is
+                estimated from the growth data, which is much less precise
+                (see :func:`~ambric.utilities.estimate_region_weights`), so
+                supply known shares where possible.
+            region_weights_concentration: How tightly the prior holds ``w``
+                to its centre (the concentration of a Dirichlet prior;
+                larger is tighter). Defaults to 500 when ``region_weights``
+                is supplied and 50 when the centre is estimated.
         """
         logger.info("Initialising ambric model.")
         required_columns = ["datetime", "measure", "region", "value"]
@@ -840,11 +1170,23 @@ class Ambric:
         ]
         if missing_regions:
             raise ValueError(f"Missing regions from dataframe: {missing_regions}")
-        # Cut out any covariates that begin before the relevant regional variables
-        earliest_regional_datetime = df.loc[
-            ((df["region"].isin(region_names)) & (df["measure"] == region_measure)),
-            "datetime",
-        ].min()
+        df = df.copy()
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        # Cut out any covariates that begin before the relevant regional
+        # variables. The sample starts at the earliest regional row, or six
+        # quarters before the first regional observation if that is earlier,
+        # so that the first annual observation has its full lag window
+        # whenever the aggregate data reach back that far.
+        is_regional = (df["region"].isin(region_names)) & (
+            df["measure"] == region_measure
+        )
+        earliest_regional_datetime = df.loc[is_regional, "datetime"].min()
+        first_regional_obs = df.loc[is_regional & df["value"].notna(), "datetime"].min()
+        if pd.notna(first_regional_obs):
+            earliest_regional_datetime = min(
+                earliest_regional_datetime,
+                first_regional_obs - pd.offsets.QuarterEnd(len(OMEGA) - 1),
+            )
         if any(df["datetime"] < earliest_regional_datetime):
             logger.info(
                 f"Data points from before first regional data points detected; truncating start of data to {earliest_regional_datetime.strftime('%Y-%b')}"
@@ -880,11 +1222,47 @@ class Ambric:
         self.bridge_info: dict | None = None
         self.xgb_model: XGBRegressor | None = None
         self.n_model_fit_iterations: int | None = None
+        self.advi_loss_history: npt.NDArray[np.float64] | None = None
+        self.advi_convergence: dict | None = None
         self.model_id: str = gen_unique_id()
-        self.datetime_ts: pd.Series = df.loc[
-            df["measure"] == aggregate_measure, "datetime"
-        ]
+        spine = build_datetime_spine(
+            df,
+            aggregate_measure=aggregate_measure,
+            aggregation_region=aggregation_region,
+        )
+        self.datetime_ts: pd.Series = pd.Series(spine, name="datetime")
+        # Row index of the first calendar Q1; annual data are for Q4.
+        self.q1_offset: int = first_q1_offset(spine)
         self.region_names = region_names
+        if region_weights is not None:
+            self.weight_prior_mean: npt.NDArray[np.float64] = normalise_region_weights(
+                region_weights, region_names
+            )
+            self.weight_prior_source: str = "supplied"
+            default_concentration = 500.0
+        else:
+            self.weight_prior_mean = estimate_region_weights(y_uk, y_annual)
+            self.weight_prior_source = "estimated"
+            default_concentration = 50.0
+            logger.info(
+                "No region_weights supplied; estimating the prior centre for "
+                "regional weights from the growth data. This is imprecise: "
+                "supply known shares if available."
+            )
+        self.weight_prior_concentration: float = (
+            default_concentration
+            if region_weights_concentration is None
+            else region_weights_concentration
+        )
+        logger.info(
+            f"Prior centre for regional weights ({self.weight_prior_source}): "
+            + ", ".join(
+                f"{name}={weight:.3f}"
+                for name, weight in zip(
+                    region_names, self.weight_prior_mean, strict=True
+                )
+            )
+        )
 
         self._validate_arrays()
 
@@ -908,6 +1286,13 @@ class Ambric:
                 f"   Posterior samples: {self.trace.posterior.draw.shape[0]}\n"  # ty: ignore[unresolved-attribute]
                 f"   ADVI iterations: {self.n_model_fit_iterations}\n"
             )
+            if self.advi_convergence is not None:
+                status = "Yes" if self.advi_convergence["converged"] else "No"
+                if self.advi_convergence["stopped_early"]:
+                    status += (
+                        f" (stopped early at {self.advi_convergence['n_iterations']})"
+                    )
+                out_string += f"   ADVI converged: {status}\n"
         else:
             out_string += "Model fitted: No\n"
         out_string += "-------------------------------------"
@@ -937,15 +1322,19 @@ class Ambric:
         xgb_params: dict | None = None,
         bridge_use_almon: bool = True,
         bridge_ridge_alpha: float = 1.0,
+        advi_log_every: int | None = None,
+        advi_convergence_tolerance: float = 1.0,
     ) -> "Ambric":
         """Fit the ambric model.
 
         Pipeline:
             1. Extract factors from regional indicator panel.
             2. Train XGBoost on annually-aggregated raw indicators to predict
-               annual regional growth.
-            3. Fit MIDAS bridge equation to disaggregate XGBoost annual
-               predictions to quarterly frequency.
+               annual regional growth. Years with an outturn are predicted
+               leave-one-year-out.
+            3. Fit MIDAS bridge equation, on those out-of-fold predictions,
+               to disaggregate XGBoost annual predictions to quarterly
+               frequency.
             4. Build Bayesian state-space model with factors, macro, and
                bridge signal.
             5. Run variational inference.
@@ -956,6 +1345,12 @@ class Ambric:
             xgb_params: Optional XGBoost hyperparameters override.
             bridge_use_almon: Use Almon polynomial for MIDAS weights.
             bridge_ridge_alpha: Ridge regularisation for bridge equation.
+            advi_log_every: Iterations between log lines reporting the ADVI
+                loss. Defaults to one twentieth of the run.
+            advi_convergence_tolerance: Largest fall in mean loss, in nats,
+                between the last two 5% windows of the run that still counts
+                as converged. A warning is logged when the fit is still
+                improving by more than this.
 
         Returns:
             Self for method chaining.
@@ -980,6 +1375,7 @@ class Ambric:
             macro=self.macro,
             y_annual=self.y_annual,
             xgb_params=xgb_params,
+            q1_offset=self.q1_offset,
         )
 
         # Step 3: Bridge equation -> quarterly signal
@@ -992,7 +1388,12 @@ class Ambric:
             macro=self.macro,
             use_almon=bridge_use_almon,
             ridge_alpha=bridge_ridge_alpha,
+            q1_offset=self.q1_offset,
+            xgb_edge_preds=self.xgb_model.edge_year_preds_,
         )
+        self.bridge_info["xgb_out_of_fold"] = self.xgb_model.out_of_fold_
+        self.bridge_info["xgb_out_of_fold_rmse"] = self.xgb_model.out_of_fold_rmse_
+        self.bridge_info["xgb_in_sample_rmse"] = self.xgb_model.in_sample_rmse_
 
         # Step 4: Build PyMC model
         logger.info("\n[4/5] Building AMBRIC Bayesian model...")
@@ -1003,6 +1404,8 @@ class Ambric:
             self.macro,
             self.bridge_signal,
             region_q_on_q=self.y_qoq_r,
+            weight_prior_mean=self.weight_prior_mean,
+            weight_prior_concentration=self.weight_prior_concentration,
         )
 
         # Step 5: Variational inference
@@ -1013,9 +1416,47 @@ class Ambric:
             inference = pm.fit(
                 n=n_model_fit_iterations,
                 method="advi",
-                callbacks=[pm.callbacks.CheckParametersConvergence()],
+                callbacks=[
+                    pm.callbacks.CheckParametersConvergence(),
+                    AdviProgressLogger(
+                        every=advi_log_every or max(n_model_fit_iterations // 20, 1),
+                        n_total=n_model_fit_iterations,
+                    ),
+                ],
             )
             self.trace: az.InferenceData = inference.sample(n_posterior_samples)
+
+        self.advi_loss_history = np.asarray(inference.hist, dtype=np.float64)
+        self.advi_convergence = assess_advi_convergence(
+            self.advi_loss_history, tolerance=advi_convergence_tolerance
+        )
+        # CheckParametersConvergence ends the run once parameters stop moving.
+        stopped_early = len(self.advi_loss_history) < n_model_fit_iterations
+        self.advi_convergence["stopped_early"] = stopped_early
+        if stopped_early:
+            self.advi_convergence["converged"] = True
+            logger.info(
+                f"ADVI stopped early after {len(self.advi_loss_history)} "
+                f"iterations: parameters had stopped changing."
+            )
+        elif self.advi_convergence["converged"]:
+            logger.info(
+                f"ADVI converged: mean loss {self.advi_convergence['final_loss']:.2f}, "
+                f"changed by {self.advi_convergence['improvement']:.2f} between "
+                f"the last two windows of {self.advi_convergence['window']} iterations."
+            )
+        else:
+            logger.warning(
+                f"ADVI has NOT converged after {n_model_fit_iterations} "
+                f"iterations: mean loss changed by "
+                f"{-self.advi_convergence['improvement']:.2f} "
+                f"(standard error {self.advi_convergence['standard_error']:.2f}) "
+                f"between the last two windows of "
+                f"{self.advi_convergence['window']} iterations; converged means "
+                f"a fall of at most {advi_convergence_tolerance}, measured to "
+                f"that precision. Estimates may be unreliable; increase "
+                f"n_model_fit_iterations."
+            )
 
         # For devs: can save model diagram using the below
         # (depends on graphviz)
@@ -1028,7 +1469,8 @@ class Ambric:
         """Saves the model trace to a NetCDF file.
 
         Args:
-            path (str | Path): Path to save the trace file
+            path (str | Path): Directory to save the trace in. The file is
+                named ``model_trace_{model_id}.nc``.
         """
         if self.trace is None:
             raise ValueError(
@@ -1101,6 +1543,22 @@ class Ambric:
             axis=0,
         )
         return results_df
+
+    def plot_advi_convergence(self, path: Path | None = None) -> None:
+        """Plot the ADVI loss against iteration to check convergence.
+
+        Args:
+            path (Path | None): Directory to save the figure as SVG. When
+                ``None`` the figure is displayed interactively.
+
+        Raises:
+            ValueError: If model not fitted.
+        """
+        if self.advi_loss_history is None:
+            raise ValueError(
+                "ADVI loss history is not available. Fit the model before plotting."
+            )
+        plot_advi_convergence(self.advi_loss_history, path=path)
 
     def plot_national_quarterly_vs_implied(
         self, path: str | Path | None = None
@@ -1257,7 +1715,9 @@ class Ambric:
                 "Factors are not available. Fit the model before assembling loadings."
             )
         factor_stds = np.std(self.factors, axis=0)
-        macro_stds = np.std(self.macro, axis=0)
+        # Macro series are z-scored inside the model, so Gamma is already the
+        # effect of a one standard deviation move.
+        macro_stds = np.ones(self.macro.shape[1])
         bridge_signal_stds = (
             np.std(self.bridge_signal, axis=0)
             if self.bridge_signal is not None
@@ -1324,7 +1784,10 @@ class Ambric:
     def economic_pulse_indicator(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table indicating the economic pulse.
 
-        Uses seasonally adjusted q-on-q growth estimates at quarterly frequency.
+        Takes the X-13 trend of each region's estimated quarterly index,
+        converts it to q-on-q growth in percent, and classifies each quarter
+        into growth bands with
+        :func:`~ambric.diagnostics.economic_pulse_indicator`.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1334,8 +1797,8 @@ class Ambric:
             ValueError: If model not fitted.
 
         Returns:
-            pd.DataFrame: Wide-format table with datetime index and one
-                column per region containing the classification.
+            pd.DataFrame: Long-format table with ``datetime``, ``region`` and
+                ``classification`` columns.
         """
         if self.trace is None:
             raise ValueError(
@@ -1363,8 +1826,8 @@ class Ambric:
     def point_estimates_q_on_4q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast point estimates by region.
 
-        Returns q-on-4q annual growth estimates (in percentage points,
-        rounded to 2 d.p.) at quarterly frequency.
+        Returns q-on-4q annual growth estimates (in percent, so 0.5 means
+        0.5%, rounded to 2 d.p.) at quarterly frequency.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1398,7 +1861,7 @@ class Ambric:
     def point_estimates_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast point estimates by region.
 
-        Returns q-on-q annual growth estimates (in percentage points,
+        Returns q-on-q growth estimates (in percent, so 0.5 means 0.5%,
         rounded to 2 d.p.) at quarterly frequency.
 
         Args:
@@ -1433,7 +1896,8 @@ class Ambric:
     def to_index_q_on_q(self, path: Path | None = None) -> pd.DataFrame:
         """Produce a table of nowcast index.
 
-        Returns index to earliest data point at quarterly frequency.
+        Returns a quarterly index of each region's estimated level, set to
+        100 in the quarter before the first row.
 
         Args:
             path (Path | None): Directory to save the table as Parquet. When
@@ -1531,6 +1995,8 @@ def run_out_of_sample_exercise(
     aggregation_region: str = "uk",
     region_measure: str = "gva_q_on_4q",
     region_q_on_q_measure: str | None = None,
+    region_weights: dict[str, float] | None = None,
+    region_weights_concentration: float | None = None,
     step_size: int = 1,
     init_chunk_size: int = 20,
     lag_qtrs: int = 6,
@@ -1562,6 +2028,12 @@ def run_out_of_sample_exercise(
             OOS window do not leak into the nowcast. Older published values
             remain as clamps. Defaults to ``None`` (no q-on-q clamp, backwards
             compatible).
+        region_weights (dict[str, float] | None): Optional weight of each
+            region in the national aggregate, passed to :class:`Ambric` at
+            every step. When ``None`` the prior centre for the weights is
+            estimated at each step from the data available at that step.
+        region_weights_concentration (float | None): Tightness of the prior
+            on the weights, passed to :class:`Ambric`.
         step_size (int): Quarters to advance per OOS step. Defaults to 1.
         init_chunk_size (int): Initial learning window size. Defaults to 20.
         lag_qtrs (int): How many quarters before annual regional data are
@@ -1579,12 +2051,19 @@ def run_out_of_sample_exercise(
         pd.DataFrame: Combined out-of-sample nowcasts and outturns across
             all rolling steps.
     """
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
-    stop: int = df.loc[df["measure"] == aggregate_measure, "datetime"].nunique()
+    datetime_spine: pd.Series = pd.Series(
+        build_datetime_spine(
+            df,
+            aggregate_measure=aggregate_measure,
+            aggregation_region=aggregation_region,
+        )
+    )
+    stop: int = len(datetime_spine)
     start = init_chunk_size
     num_steps = math.ceil((stop - start) / step_size)
-    datetime_spine: pd.Series = df.loc[df["measure"] == aggregate_measure, "datetime"]
-    datetime_spine = datetime_spine.sort_values()
     logger.info(f"Running out-of-sample analysis on {region_measure}:\n")
     logger.info(
         f"    burn-in: from {datetime_spine.iloc[0].strftime('%Y-%b')} to {datetime_spine.iloc[start].strftime('%Y-%b')}"
@@ -1637,6 +2116,8 @@ def run_out_of_sample_exercise(
             aggregation_region=aggregation_region,
             region_measure=region_measure,
             region_q_on_q_measure=region_q_on_q_measure,
+            region_weights=region_weights,
+            region_weights_concentration=region_weights_concentration,
         )
 
         logger.info("Ambric model created with ID: " + amb.model_id)

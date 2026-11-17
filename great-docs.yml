@@ -79,13 +79,14 @@ reference:
     desc: Main classes provided by the package
     contents:
       - name: Ambric
-        members: false  # 18 methods listed below
+        members: false  # methods listed below
 
   - title: Ambric Methods
     desc: Methods for the Ambric class
     contents:
       - Ambric.__repr__
       - Ambric.fit
+      - Ambric.plot_advi_convergence
       - Ambric.save_trace
       - Ambric.populate_results
       - Ambric.plot_national_quarterly_vs_implied
@@ -115,6 +116,10 @@ reference:
       - run_out_of_sample_exercise
       - trace_to_series
       - trend_adjust_out_of_sample_results
+      - benchmark.run_recovery_benchmark
+      - diagnostics.assess_advi_convergence
+      - utilities.estimate_region_weights
+      - utilities.normalise_region_weights
       - utilities.generate_realistic_simulated_data
       - utilities.simulate_data
       - utilities.simulate_real_time_data
@@ -123,6 +128,8 @@ reference:
     desc: Module-level constants and data
     contents:
       - utilities.OMEGA
+      - utilities.PRIOR_SCALES
+      - utilities.GROWTH_SCALE
 
 # Site Settings
 # -------------

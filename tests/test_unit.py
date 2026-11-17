@@ -5,28 +5,43 @@ No model fitting is performed — only the deterministic helpers and
 validation paths are exercised.
 """
 
+import arviz as az
 import numpy as np
 import pandas as pd
+import pymc as pm
 import pytest
+from loguru import logger
 
 from ambric import (
     Ambric,
     _aggregate_quarterly_to_annual,
     _almon_weights,
     _apply_midas_weights,
+    build_ambric_model,
     extract_factors_from_panel,
+    fit_bridge_equation,
     impute_panel,
     quarter_differences,
     train_xgboost_annual,
 )
 from ambric.diagnostics import (
+    AdviProgressLogger,
     assemble_loadings_data,
+    assess_advi_convergence,
     recession_indicator,
     rmse_national_quarterly,
     rmse_regions_annual,
     rmse_regions_quarterly,
+    trace_to_series,
 )
-from ambric.utilities import generate_realistic_simulated_data, prep_data_for_model_run
+from ambric.utilities import (
+    OMEGA,
+    estimate_region_weights,
+    first_q1_offset,
+    generate_realistic_simulated_data,
+    normalise_region_weights,
+    prep_data_for_model_run,
+)
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -570,3 +585,677 @@ class TestAssembleLoadingsDataScaling:
         assert np.isclose(row["mean"].iloc[0], -3.0)
 
         assert df["scaled"].all()
+
+
+# ── Data alignment (date spine, ordering, calendar) ─────────────────────────
+
+
+def _names(df: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
+    """(region_names, macro_names, region_covariate_names) for a simulated df."""
+    region_names = sorted([x for x in df["region"].unique() if x != "uk"])
+    macro_names = sorted([x for x in df["measure"].unique() if "macro" in x])
+    covariate_names = sorted(
+        [x for x in df["measure"].unique() if "regional_covar" in x]
+    )
+    return region_names, macro_names, covariate_names
+
+
+class TestDataAlignment:
+    def test_row_order_does_not_change_arrays(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shuffled = simulated_df.sample(frac=1, random_state=0)
+
+        expected = prep_data_for_model_run(
+            simulated_df, macro_names, region_names, covariate_names
+        )
+        result = prep_data_for_model_run(
+            shuffled, macro_names, region_names, covariate_names
+        )
+
+        np.testing.assert_array_equal(result[0], expected[0])  # y_uk
+        np.testing.assert_array_equal(result[1], expected[1])  # y_annual
+        np.testing.assert_array_equal(result[3], expected[3])  # macro
+        for z_result, z_expected in zip(result[2], expected[2], strict=True):
+            np.testing.assert_array_equal(z_result, z_expected)
+
+    def test_shuffled_rows_give_sorted_datetime_ts(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shuffled = simulated_df.sample(frac=1, random_state=0)
+
+        amb = Ambric(shuffled, macro_names, region_names, covariate_names)
+
+        assert amb.datetime_ts.is_monotonic_increasing
+        assert amb.datetime_ts.is_unique
+        assert len(amb.datetime_ts) == amb.y_uk.shape[0]
+
+    def test_macro_columns_follow_macro_names_order(self, simulated_df):
+        df = simulated_df.copy()
+        # Names whose requested order is the reverse of alphabetical order
+        df["measure"] = df["measure"].replace(
+            {"macro_0": "unemployment", "macro_1": "cpi"}
+        )
+        region_names, _, covariate_names = _names(df)
+        macro_names = ["unemployment", "cpi"]
+
+        macro = prep_data_for_model_run(df, macro_names, region_names, covariate_names)[
+            3
+        ]
+
+        for col, name in enumerate(macro_names):
+            expected = df.loc[df["measure"] == name].sort_values("datetime")["value"]
+            np.testing.assert_array_equal(macro[:, col], expected.values)
+
+    def test_annual_rows_only_at_year_end_align_to_spine(self, simulated_df):
+        """Regional data supplied without NaN padding rows must land on the
+        same quarters as the padded version."""
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        is_padding = (simulated_df["measure"] == "gva_q_on_4q") & simulated_df[
+            "value"
+        ].isna()
+        df_no_padding = simulated_df.loc[~is_padding]
+
+        expected = prep_data_for_model_run(
+            simulated_df, macro_names, region_names, covariate_names
+        )
+        result = prep_data_for_model_run(
+            df_no_padding, macro_names, region_names, covariate_names
+        )
+
+        assert is_padding.any()
+        np.testing.assert_array_equal(result[1], expected[1])
+        assert result[4] == expected[4]  # same publication lag
+
+    def test_duplicate_rows_raise(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        df = pd.concat([simulated_df, simulated_df.iloc[[0]]], ignore_index=True)
+
+        with pytest.raises(ValueError, match="Duplicate rows"):
+            prep_data_for_model_run(df, macro_names, region_names, covariate_names)
+
+    def test_gap_in_aggregate_series_raises(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        is_gap = (simulated_df["measure"] == "gva_q_on_q") & (
+            simulated_df["datetime"] == dates[10]
+        )
+
+        with pytest.raises(ValueError, match="missing quarters"):
+            prep_data_for_model_run(
+                simulated_df.loc[~is_gap], macro_names, region_names, covariate_names
+            )
+
+    def test_incomplete_macro_series_raises(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        is_missing = (simulated_df["measure"] == macro_names[0]) & (
+            simulated_df["datetime"] == dates[-1]
+        )
+
+        with pytest.raises(ValueError, match="Macro series with missing values"):
+            prep_data_for_model_run(
+                simulated_df.loc[~is_missing],
+                macro_names,
+                region_names,
+                covariate_names,
+            )
+
+
+class TestCalendarOffset:
+    @pytest.mark.parametrize(
+        ("first_date", "expected"),
+        [
+            ("2000-03-31", 0),
+            ("2000-06-30", 3),
+            ("2000-09-30", 2),
+            ("2000-12-31", 1),
+        ],
+    )
+    def test_first_q1_offset(self, first_date, expected):
+        spine = pd.date_range(first_date, periods=12, freq="QE")
+
+        offset = first_q1_offset(spine)
+
+        assert offset == expected
+        assert spine[offset].quarter == 1
+
+    def test_aggregate_skips_rows_before_first_q1(self):
+        X = np.arange(11, dtype=np.float64).reshape(-1, 1)  # rows 0,1 are Q3,Q4
+
+        result = _aggregate_quarterly_to_annual(X, q1_offset=2)
+
+        np.testing.assert_allclose(result[:, 0], [3.5, 7.5])
+
+    def test_xgboost_start_quarter_does_not_change_predictions(self):
+        """Dropping the first two quarters (so the sample starts in Q3) must
+        give the same annual predictions for the years that remain."""
+        rng = np.random.default_rng(0)
+        T, R, J, M = 40, 3, 2, 1
+        Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+        macro = rng.normal(size=(T, M))
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = rng.normal(size=(len(range(7, T, 4)), R))  # year 0 unobserved
+
+        _, expected = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, result = train_xgboost_annual(
+            [z[2:] for z in Z_panel], macro[2:], y_annual[2:], q1_offset=2
+        )
+
+        np.testing.assert_allclose(result, expected[1:])
+
+    def test_bridge_signal_sums_to_annual_fit_when_sample_starts_mid_year(self):
+        rng = np.random.default_rng(1)
+        T, R, J, offset = 38, 3, 2, 2
+        Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+        y_uk = rng.normal(scale=0.5, size=T)
+        macro = rng.normal(size=(T, 1))
+        y_annual = np.full((T, R), np.nan)
+        q4_rows = np.arange(offset + 3, T, 4)
+        y_annual[q4_rows] = rng.normal(size=(len(q4_rows), R))
+        xgb_preds = rng.normal(size=(len(q4_rows), R))
+
+        signal, info = fit_bridge_equation(
+            y_annual, xgb_preds, Z_panel, y_uk, macro, use_almon=False, q1_offset=offset
+        )
+
+        # Summing the quarterly signal over a calendar year reproduces the
+        # bridge regression's annual fitted value.
+        for a, q4 in enumerate(q4_rows):
+            for r in range(R):
+                indicators = np.concatenate(
+                    [[y_uk[q4 - 3 : q4 + 1].mean()]]
+                    + [[Z_panel[j][q4 - 3 : q4 + 1, r].mean()] for j in range(J)]
+                )
+                fitted = info["bridge_reg"].predict(
+                    np.concatenate([[xgb_preds[a, r]], indicators]).reshape(1, -1)
+                )[0]
+                assert signal[q4 - 3 : q4 + 1, r].sum() == pytest.approx(fitted)
+
+    def test_ambric_detects_mid_year_start(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        dates = sorted(simulated_df["datetime"].unique())
+        df = simulated_df.loc[simulated_df["datetime"] >= dates[2]]  # starts in Q3
+
+        amb = Ambric(df, macro_names, region_names, covariate_names)
+
+        assert amb.q1_offset == 2
+        assert amb.datetime_ts.iloc[amb.q1_offset].quarter == 1
+
+    def test_sample_starts_six_quarters_before_first_annual_observation(
+        self, simulated_df
+    ):
+        """With year-end-only regional rows, the sample keeps the six earlier
+        quarters that the first annual observation depends on."""
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        is_padding = (simulated_df["measure"] == "gva_q_on_4q") & simulated_df[
+            "value"
+        ].isna()
+        df = simulated_df.loc[~is_padding]
+        first_obs = df.loc[df["measure"] == "gva_q_on_4q", "datetime"].min()
+
+        amb = Ambric(df, macro_names, region_names, covariate_names)
+
+        assert amb.datetime_ts.iloc[6] == first_obs
+        assert not np.any(np.isnan(amb.y_annual[6]))
+
+
+class TestEarlyAnnualObservations:
+    def test_observations_without_full_lag_window_are_excluded(self):
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 1
+        y_annual = np.full((T, R), np.nan)
+        y_annual[3::4] = 0.02  # rows 3, 7, 11, 15; row 3 lacks a full window
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, K)),
+            macro=rng.normal(size=(T, M)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+        )
+
+        n_observed = model["obs_annual_observed"].eval().size
+        assert n_observed == 3 * R
+
+    def test_annual_estimates_are_nan_before_full_lag_window(self):
+        rng = np.random.default_rng(0)
+        T, R = 12, 2
+        trace = az.from_dict(
+            posterior={
+                "y_reg": rng.normal(size=(1, 20, T, R)),
+                "w": np.full((1, 20, R), 0.5),
+            }
+        )
+
+        _, _, y_annual_est = trace_to_series(trace)
+
+        assert np.all(np.isnan(y_annual_est[:6]))
+        assert not np.any(np.isnan(y_annual_est[6:]))
+
+
+# ── ADVI convergence reporting ──────────────────────────────────────────────
+
+
+class TestAdviConvergence:
+    def test_falling_loss_is_not_converged(self):
+        losses = np.linspace(1000.0, 0.0, 2000)
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is False
+        assert result["improvement"] == pytest.approx(50.0, rel=0.01)
+        assert result["window"] == 100
+        assert result["n_iterations"] == 2000
+
+    def test_flat_noisy_loss_is_converged(self):
+        rng = np.random.default_rng(0)
+        losses = np.concatenate(
+            [np.linspace(1000.0, 5.0, 500), 5.0 + rng.normal(scale=2.0, size=20000)]
+        )
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is True
+        assert result["final_loss"] == pytest.approx(5.0, abs=0.2)
+
+    def test_noisy_short_run_is_not_converged_by_chance(self):
+        """A loss too noisy to measure must not pass just because the last
+        window happened to be no lower than the one before."""
+        rng = np.random.default_rng(0)
+        losses = 30000.0 + rng.normal(scale=15000.0, size=400)
+
+        result = assess_advi_convergence(losses, tolerance=1.0)
+
+        assert result["converged"] is False
+        assert result["standard_error"] > 1.0
+
+    def test_non_finite_loss_is_not_converged(self):
+        losses = np.full(1000, np.inf)
+
+        result = assess_advi_convergence(losses)
+
+        assert result["converged"] is False
+
+    def test_progress_logger_reports_every_n_iterations(self):
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, format="{message}", level="INFO")
+        progress = AdviProgressLogger(every=100, n_total=300)
+        losses = np.linspace(300.0, 0.0, 300)
+
+        try:
+            for i in range(1, 301):
+                progress(None, losses[:i], i)
+        finally:
+            logger.remove(sink_id)
+
+        reports = [m for m in messages if "ADVI" in m]
+        assert len(reports) == 3
+        assert "100/300" in reports[0]
+        assert "improved by 100.33" in reports[1]
+
+
+# ── Scale handling (decimal growth rates) ───────────────────────────────────
+
+
+def _bridge_inputs(seed: int = 0):
+    """Small synthetic inputs for the XGBoost and bridge steps, in decimals."""
+    rng = np.random.default_rng(seed)
+    T, R, J = 60, 4, 2
+    Z_panel = [rng.normal(size=(T, R)) for _ in range(J)]
+    macro = rng.normal(size=(T, 1))
+    y_uk = rng.normal(scale=0.005, size=T)
+    y_annual = np.full((T, R), np.nan)
+    q4_rows = np.arange(3, T, 4)
+    signal = sum(z.reshape(T // 4, 4, R).mean(axis=1) for z in Z_panel)
+    y_annual[q4_rows] = 0.02 * signal + rng.normal(scale=0.005, size=signal.shape)
+    return Z_panel, macro, y_uk, y_annual
+
+
+class TestScaleHandling:
+    def test_xgboost_learns_from_decimal_growth_rates(self):
+        """With targets of order 0.02 the regularisation must not flatten the
+        fit: predictions should vary and track the target."""
+        Z_panel, macro, _, y_annual = _bridge_inputs()
+
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        target = y_annual[3::4]
+        assert np.corrcoef(preds.ravel(), target.ravel())[0, 1] > 0.8
+        assert preds.std() > 0.5 * target.std()
+
+    def test_xgboost_predictions_scale_with_growth_units(self):
+        Z_panel, macro, _, y_annual = _bridge_inputs()
+
+        _, preds_decimal = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, preds_percent = train_xgboost_annual(Z_panel, macro, y_annual * 100)
+
+        np.testing.assert_allclose(preds_percent, preds_decimal * 100, rtol=1e-3)
+
+    def test_bridge_fit_does_not_depend_on_growth_units(self):
+        Z_panel, macro, y_uk, y_annual = _bridge_inputs()
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        signal_decimal, info_decimal = fit_bridge_equation(
+            y_annual, preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        signal_percent, info_percent = fit_bridge_equation(
+            y_annual * 100, preds * 100, Z_panel, y_uk * 100, macro, use_almon=False
+        )
+
+        assert info_percent["bridge_r2"] == pytest.approx(info_decimal["bridge_r2"])
+        np.testing.assert_allclose(
+            signal_percent, signal_decimal * 100, rtol=1e-4, atol=1e-6
+        )
+        # The ridge penalty must not wipe out a real relationship
+        assert info_decimal["bridge_r2"] > 0.5
+
+    def test_bridge_coefficients_reproduce_regression_predictions(self):
+        Z_panel, macro, y_uk, y_annual = _bridge_inputs()
+        _, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+        _, info = fit_bridge_equation(
+            y_annual, preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        rng = np.random.default_rng(1)
+        X_new = rng.normal(size=(5, 1 + 1 + len(Z_panel)))
+
+        by_hand = (
+            X_new @ np.concatenate([[info["delta"]], info["betas"]]) + info["intercept"]
+        )
+
+        np.testing.assert_allclose(info["bridge_reg"].predict(X_new), by_hand)
+
+    def test_model_does_not_depend_on_macro_units(self):
+        """Rescaling and shifting a macro series must leave the model's
+        log-probability unchanged, since macro is z-scored internally."""
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 2
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+        macro = rng.normal(size=(T, M))
+        y_uk = rng.normal(scale=0.005, size=T)
+        factors = rng.normal(size=(T, K))
+        bridge_signal = rng.normal(scale=0.005, size=(T, R))
+
+        def _build(macro_in: np.ndarray) -> pm.Model:
+            return build_ambric_model(
+                y_uk=y_uk,
+                y_annual=y_annual,
+                factors=factors,
+                macro=macro_in,
+                bridge_signal=bridge_signal,
+            )
+
+        model = _build(macro)
+        model_rescaled = _build(macro * 1000 + 50)
+
+        point = model.initial_point()
+        assert model_rescaled.compile_logp()(point) == pytest.approx(
+            model.compile_logp()(point)
+        )
+
+    def test_growth_parameters_are_reported_in_decimal_units(self):
+        rng = np.random.default_rng(0)
+        T, R, K, M = 16, 2, 1, 1
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, K)),
+            macro=rng.normal(size=(T, M)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+        )
+
+        deterministic_names = {v.name for v in model.deterministics}
+        assert {
+            "y_reg",
+            "sigma_eps",
+            "sigma_uk",
+            "sigma_ann",
+            "Lambda",
+            "Gamma",
+            "alpha_r",
+        }.issubset(deterministic_names)
+        prior = pm.sample_prior_predictive(
+            draws=500, model=model, var_names=["sigma_eps", "y_reg"], random_seed=0
+        )["prior"]
+        # Prior quarterly growth and its innovation scale are of the order of
+        # a few percent at most, not tens of percent.
+        assert float(prior["sigma_eps"].mean()) < 0.02
+        assert float(np.abs(prior["y_reg"]).mean()) < 0.1
+
+
+# ── Out-of-fold XGBoost predictions (no in-sample leakage) ──────────────────
+
+# Settings under which XGBoost can memorise its training data
+_MEMORISING_XGB = dict(
+    n_estimators=300,
+    max_depth=8,
+    learning_rate=0.3,
+    subsample=1.0,
+    colsample_bytree=1.0,
+    reg_alpha=0.0,
+    reg_lambda=0.0,
+    min_child_weight=0,
+)
+
+
+def _pure_noise_inputs(seed: int = 0, T: int = 80, R: int = 5):
+    """Annual targets that are unrelated to the features."""
+    rng = np.random.default_rng(seed)
+    Z_panel = [rng.normal(size=(T, R)) for _ in range(3)]
+    macro = rng.normal(size=(T, 1))
+    y_annual = np.full((T, R), np.nan)
+    y_annual[3::4] = rng.normal(scale=0.02, size=(T // 4, R))
+    return Z_panel, macro, y_annual
+
+
+class TestOutOfFoldPredictions:
+    def test_observed_years_are_not_predicted_by_a_model_that_saw_them(self):
+        """The target is noise, so a model can only match it by memorising.
+        The fitted model does memorise its training data, but the returned
+        predictions for observed years must not benefit from that."""
+        Z_panel, macro, y_annual = _pure_noise_inputs()
+
+        model, preds = train_xgboost_annual(
+            Z_panel, macro, y_annual, xgb_params=_MEMORISING_XGB
+        )
+
+        target = y_annual[3::4]
+        assert model.in_sample_rmse_ < 0.1 * target.std()  # it can memorise
+        assert abs(np.corrcoef(preds.ravel(), target.ravel())[0, 1]) < 0.3
+        assert model.out_of_fold_rmse_ > 0.8 * target.std()
+        assert model.out_of_fold_ is True
+
+    def test_unobserved_years_are_predicted_by_the_full_model(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs()
+        y_annual[-8:] = np.nan  # last two years unpublished
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        assert not np.any(np.isnan(preds))
+        features_last_year = np.column_stack(
+            [z[-4:].mean(axis=0) for z in Z_panel]
+            + [np.full(y_annual.shape[1], macro[-4:].mean())]
+        )
+        expected = (
+            model.predict(features_last_year) * model.target_scale_ + model.target_mean_
+        )
+        np.testing.assert_allclose(preds[-1], expected, rtol=1e-5)
+
+    def test_single_observed_year_falls_back_to_in_sample(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs(T=20)
+        y_annual[:] = np.nan
+        y_annual[7] = 0.02 + 0.01 * np.arange(y_annual.shape[1])
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+
+        assert model.out_of_fold_ is False
+        assert not np.any(np.isnan(preds))
+
+    def test_incomplete_final_year_gets_its_own_prediction(self):
+        Z_panel, macro, y_annual = _pure_noise_inputs(T=80)
+        Z_panel = [np.vstack([z, z[:2] + 5.0]) for z in Z_panel]  # 2 extra quarters
+        macro = np.vstack([macro, macro[:2]])
+        y_annual = np.vstack([y_annual, np.full((2, y_annual.shape[1]), np.nan)])
+
+        model, preds = train_xgboost_annual(Z_panel, macro, y_annual)
+        first_edge, last_edge = model.edge_year_preds_
+
+        assert preds.shape[0] == 20
+        assert first_edge is None
+        assert last_edge is not None and last_edge.shape == (y_annual.shape[1],)
+
+    def test_bridge_signal_uses_incomplete_year_prediction(self):
+        rng = np.random.default_rng(2)
+        T, R = 42, 3  # ten complete years and two further quarters
+        Z_panel = [rng.normal(size=(T, R))]
+        macro = rng.normal(size=(T, 1))
+        y_uk = rng.normal(scale=0.005, size=T)
+        y_annual = np.full((T, R), np.nan)
+        y_annual[3:40:4] = rng.normal(scale=0.02, size=(10, R))
+        xgb_preds = y_annual[3:40:4] + rng.normal(scale=0.005, size=(10, R))
+        last_edge = np.array([0.5, -0.5, 0.25])
+
+        signal_nearest, info = fit_bridge_equation(
+            y_annual, xgb_preds, Z_panel, y_uk, macro, use_almon=False
+        )
+        signal_edge, _ = fit_bridge_equation(
+            y_annual,
+            xgb_preds,
+            Z_panel,
+            y_uk,
+            macro,
+            use_almon=False,
+            xgb_edge_preds=(None, last_edge),
+        )
+
+        np.testing.assert_allclose(signal_edge[:40], signal_nearest[:40])
+        expected_shift = (info["delta"] / 4.0) * (last_edge - xgb_preds[-1])
+        np.testing.assert_allclose(
+            signal_edge[40:] - signal_nearest[40:], np.tile(expected_shift, (2, 1))
+        )
+
+
+# ── Regional weights ────────────────────────────────────────────────────────
+
+
+class TestRegionWeights:
+    def test_supplied_weights_are_normalised_in_region_order(self):
+        result = normalise_region_weights({"b": 30.0, "a": 10.0}, ["a", "b"])
+
+        np.testing.assert_allclose(result, [0.25, 0.75])
+
+    @pytest.mark.parametrize(
+        "weights",
+        [{"a": 0.5}, {"a": 0.5, "b": 0.3, "c": 0.2}, {"a": 0.5, "b": -0.1}],
+        ids=["missing region", "unknown region", "negative weight"],
+    )
+    def test_invalid_supplied_weights_raise(self, weights):
+        with pytest.raises(ValueError, match="region_weights"):
+            normalise_region_weights(weights, ["a", "b"])
+
+    def test_estimated_weights_are_valid_shares(self):
+        rng = np.random.default_rng(0)
+        T, R = 80, 4
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = rng.normal(scale=0.02, size=(len(range(7, T, 4)), R))
+
+        weights = estimate_region_weights(rng.normal(scale=0.005, size=T), y_annual)
+
+        assert weights.shape == (R,)
+        assert weights.sum() == pytest.approx(1.0)
+        assert np.all(weights >= 0)
+
+    def test_estimated_weights_recover_clear_differences(self):
+        """With exact aggregation and independent regions, the estimate
+        ranks the regions correctly and is closer to the truth than equal
+        weights are."""
+        rng = np.random.default_rng(0)
+        T, R = 200, 3
+        w_true = np.array([0.6, 0.3, 0.1])
+        y_reg = rng.normal(scale=0.01, size=(T, R))
+        y_uk = y_reg @ w_true
+        y_annual = np.full((T, R), np.nan)
+        for t in range(7, T, 4):
+            y_annual[t] = sum(OMEGA[j] * y_reg[t - j] for j in range(7))
+
+        weights = estimate_region_weights(y_uk, y_annual)
+
+        assert list(np.argsort(weights)) == [2, 1, 0]
+        assert np.abs(weights - w_true).max() < np.abs(1 / R - w_true).max()
+
+    def test_no_complete_annual_rows_gives_equal_weights(self):
+        y_annual = np.full((20, 4), np.nan)
+
+        weights = estimate_region_weights(np.zeros(20), y_annual)
+
+        np.testing.assert_allclose(weights, 0.25)
+
+    def test_weight_prior_is_centred_on_supplied_shares_and_sums_to_one(self):
+        rng = np.random.default_rng(0)
+        T, R = 16, 3
+        y_annual = np.full((T, R), np.nan)
+        y_annual[7::4] = 0.02
+        prior_mean = np.array([0.6, 0.3, 0.1])
+
+        model = build_ambric_model(
+            y_uk=rng.normal(scale=0.005, size=T),
+            y_annual=y_annual,
+            factors=rng.normal(size=(T, 1)),
+            macro=rng.normal(size=(T, 1)),
+            bridge_signal=rng.normal(scale=0.005, size=(T, R)),
+            weight_prior_mean=prior_mean,
+            weight_prior_concentration=500.0,
+        )
+        w_prior = pm.sample_prior_predictive(
+            draws=2000, model=model, var_names=["w"], random_seed=0
+        )["prior"]["w"]
+
+        np.testing.assert_allclose(
+            w_prior.mean(dim=("chain", "draw")).values, prior_mean, atol=0.005
+        )
+        np.testing.assert_allclose(w_prior.sum(dim="w_dim_0").values, 1.0)
+        assert float(w_prior.min()) > 0
+
+    def test_ambric_uses_supplied_weights(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+        shares = {name: float(i + 1) for i, name in enumerate(region_names)}
+
+        amb = Ambric(
+            simulated_df,
+            macro_names,
+            region_names,
+            covariate_names,
+            region_weights=shares,
+        )
+
+        np.testing.assert_allclose(amb.weight_prior_mean, np.arange(1, 5) / 10)
+        assert amb.weight_prior_source == "supplied"
+        assert amb.weight_prior_concentration == 500.0
+
+    def test_ambric_estimates_weights_when_none_supplied(self, simulated_df):
+        region_names, macro_names, covariate_names = _names(simulated_df)
+
+        amb = Ambric(simulated_df, macro_names, region_names, covariate_names)
+
+        assert amb.weight_prior_source == "estimated"
+        assert amb.weight_prior_concentration == 50.0
+        assert amb.weight_prior_mean.sum() == pytest.approx(1.0)
+
+    def test_implied_national_growth_is_the_weighted_sum(self):
+        """National growth must be sum_r w_r * y_reg[t, r], which differs
+        from the plain regional mean when weights are unequal."""
+        rng = np.random.default_rng(0)
+        T, R, draws = 20, 3, 50
+        y_reg = rng.normal(size=(1, draws, T, R))
+        weights = np.array([0.7, 0.2, 0.1])
+        trace = az.from_dict(
+            posterior={"y_reg": y_reg, "w": np.broadcast_to(weights, (1, draws, R))}
+        )
+
+        y_uk_est, _, _ = trace_to_series(trace)
+
+        expected = y_reg.mean(axis=(0, 1)) @ weights
+        np.testing.assert_allclose(y_uk_est, expected)
+        assert np.abs(y_uk_est - y_reg.mean(axis=(0, 1, 3))).max() > 0.05

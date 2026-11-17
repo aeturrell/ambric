@@ -33,19 +33,23 @@ The core model features are:
 
 - Robust observations: Student-t likelihoods for UK and annual constraints provide robustness to outliers.
 
-- Mixed frequency: Only annual growth data are observed, but latent quarterly growth data are estimated.
+- Mixed frequency: Regional growth is observed annually, while latent quarterly growth is estimated for every region and quarter.
+
+- Published quarterly regional data (optional): Where quarterly regional growth is published, for some regions or some quarters, the model's quarterly growth for those cells is fixed to the published values, which then inform the other regions and quarters through the constraints and dynamics.
 
 - Cross-sectional constraint: National and regional growth rates are constrained to be consistent.
 
 - Temporal constraints: Annual regional growth rates are constrained to be consistent with latent quarterly growth rates.
 
-- Soft implementation of constraints: Regional growth rates are not always *exactly* consistent with the national growth rate, for measurement, extra-regional, and rounding reasons. Regional weights, $w$, are estimated rather than fixed, allowing the model to learn the effective contribution of each region to the national total.
+- Soft implementation of constraints: Regional growth rates are not always *exactly* consistent with the national growth rate, for measurement, extra-regional, and rounding reasons. Regional weights, $w$, are positive and sum to one. Their prior is centred on shares you supply (for example each region's share of national output) or, failing that, on shares estimated from the growth data, and the model can move away from that centre.
 
 - Dimensional reduction: With a rich set of data on each region, it would be extremely difficult to solve the model due to the increasing number of parameters. Factor analysis is applied to the panel of regional indicators first to reduce the dimensionality to a manageable level.
 
-- XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. This allows the model to incorporate non-linear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
+- XGBoost bridge signal: An XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are then disaggregated to quarterly frequency via a MIDAS bridge equation, producing a quarterly signal $s_{t,r}$ that enters the state-space model with a hierarchical loading $\delta_r$. Predictions for years with a published outturn are made out-of-fold (each year is predicted by a model trained on the other years), so the bridge equation is not fitted to XGBoost's in-sample fit. This allows the model to incorporate non-linear relationships captured by XGBoost while retaining the Bayesian uncertainty quantification of the state-space framework.
 
 AMBRIC is currently supported on macOS and Linux only; Windows users should run AMBRIC under WSL.
+
+**Units.** Growth rates must be supplied as decimals: `0.005` for 0.5%. The model's priors are sized for decimal growth rates, and the posterior (`amb.trace`) and `amb.populate_results()` are in the same units. The summary tables `point_estimates_q_on_q()` and `point_estimates_q_on_4q()` report percentages instead (`0.5` for 0.5%), rounded to two decimal places. Macro series and regional indicators can be in any units; they are standardised internally.
 
 ## Model Details
 
@@ -59,8 +63,8 @@ Let $Y$ be the variable of interest in levels.
 - $y^\text{UK}_t = \log(Y^\text{UK}_t) - \log(Y^\text{UK}_{t-1})$ is the quarterly growth rate for the whole nation (observed).
 - $Y_{t, r}$ is the level for region $r$ in quarter $t$ (never observed)
 - $Y_{t, r}^A = Y_{t, r} + Y_{t-1, r} + Y_{t-2, r} + Y_{t-3, r}$ is the annual level for region $r$. Observed for Q4 only, and with a lag.
-- $y_{t, r}^A = \log(Y_{t, r}^A) - \log(Y^{A}_{t-4,r})$ is the annual growth in region $r$; observed Q4 only. $y^A_t = (y^{A}_{t,1}, \ldots, y_{t, r}^A)'$ is the vector of these.
-- $y_{t, r} = \log(Y_{t, r}) - \log(Y_{t-1, r})$ is the quarterly growth rate in region $r$ (never observed). $y^Q_t = (y_{t,1}, \ldots, y_{t, r})'$ is the vector of these.
+- $y_{t, r}^A = \log(Y_{t, r}^A) - \log(Y^{A}_{t-4,r})$ is the annual growth in region $r$; observed Q4 only. $y^A_t = (y^{A}_{t,1}, \ldots, y_{t, R}^A)'$ is the vector of these.
+- $y_{t, r} = \log(Y_{t, r}) - \log(Y_{t-1, r})$ is the quarterly growth rate in region $r$ (unobserved, unless published quarterly regional data are supplied for that region and quarter). $y^Q_t = (y_{t,1}, \ldots, y_{t, R})'$ is the vector of these.
 - $\boldsymbol{Z}_t$ is a panel of regional indicators, with elements $Z_{j,r,t}$.
 - $s_{t,r}$ is a quarterly bridge signal for region $r$, derived from XGBoost annual predictions disaggregated via a MIDAS bridge equation. $\mathbf{s}_t = (s_{t,1}, \ldots, s_{t,R})'$ is the vector of these.
 
@@ -82,15 +86,15 @@ The core equation of AMBRIC is:
 
 $$
 \begin{equation}
-\mathbf{y}_t = \boldsymbol{\Phi}_r \mathbf{y}_{t-1} + (\mathbf{I} - \boldsymbol{\Phi}_r)(\boldsymbol{\Lambda} \mathbf{F}_t + \boldsymbol{\Gamma} \mathbf{X}_t + \boldsymbol{\delta} \odot \mathbf{s}_t) + \boldsymbol{\epsilon}_t
+\mathbf{y}_t = \boldsymbol{\Phi}_r \mathbf{y}_{t-1} + (\mathbf{I} - \boldsymbol{\Phi}_r)(\boldsymbol{\alpha} + \boldsymbol{\Lambda} \mathbf{F}_t + \boldsymbol{\Gamma} \mathbf{X}_t + \boldsymbol{\delta} \odot \mathbf{s}_t) + \boldsymbol{\epsilon}_t
 \end{equation}
 $$
 
-where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive term in equation (1) is a diagonal matrix, $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$. The factors $\mathbf{F}_t$ themselves follow an AR(1) process governed by $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$ (see below). $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication (the Hadamard product.)
+where $\mathbf{y}_t$ is the vector of regional quarterly growth rates, $\mathbf{F}_t$ is a vector of factors based on a regional panel of indicators, $\mathbf{X}_t$ is a vector of national statistics (each standardised to zero mean and unit variance inside the model), $\boldsymbol{\alpha} = (\alpha_1, \ldots, \alpha_R)'$ are regional mean growth rates, and $\mathbf{s}_t$ is a quarterly bridge signal derived from XGBoost predictions via a MIDAS bridge equation. The auto-regressive term in equation (1) is a diagonal matrix, $\boldsymbol{\Phi}_r = \text{diag}(\boldsymbol{\phi}_r)$. The factors $\mathbf{F}_t$ themselves follow an AR(1) process governed by $\boldsymbol{\Phi}_f = \text{diag}(\boldsymbol{\phi}_f)$ (see below). $\boldsymbol{\Lambda}$ are *factor loadings*, $\boldsymbol{\Gamma}$ are *macro loadings*, and $\boldsymbol{\delta} = (\delta_1, \ldots, \delta_R)'$ are *bridge signal loadings* with $\odot$ denoting element-wise multiplication (the Hadamard product.)
 
 #### Observed vs estimated data
 
-We observe $\boldsymbol{Z}_t$, $y_t^\text{UK}$, and, with a significant lag, $y_{t, r}^A$ for $t\mod 4 \equiv 0$ (ie 4th quarter only.)
+We observe $\boldsymbol{Z}_t$, $y_t^\text{UK}$, and, with a significant lag, $y_{t, r}^A$ for $t\mod 4 \equiv 0$ (ie 4th quarter only.) Optionally, we also observe $y_{t,r}$ for some regions and quarters (see [Published quarterly regional growth](#published-quarterly-regional-growth)).
 
 The model estimates many parameters, but those that are "outputs" are $y_{t,r}$ and $y_{t,r}^A$, the latter only for $t\mod 4 \neq 0$.
 
@@ -102,7 +106,7 @@ $$
 y_t^{\text{UK}} = \mathbf{w}^\top \mathbf{y}_t \quad \text{ and }\quad \boldsymbol{y}_t^{A} = \boldsymbol{\Omega}(L) \mathbf{y}_t
 $$
 
-although the latter with a lag. In this, the first equation is the cross-sectional constraint and the latter is the temporal constraint, which uses a lag polynomial $\boldsymbol{\Omega}(L) = \sum_{j=0}^{6} \Omega_j L^j$. The cross-sectional constraint ensures that quarterly regional growth is consistent with quarterly national growth, while the temporal constraint ensures that the regional growth is consistent with UK annual growth. (NB: weights not shown here for brevity.)
+although the latter with a lag. The weights $\mathbf{w}$ are positive and sum to one. The annual relationship needs six earlier quarters, so an annual observation in the first six quarters of the sample cannot be matched to a full sum and is left out of the annual constraint. In this, the first equation is the cross-sectional constraint and the latter is the temporal constraint, which uses a lag polynomial $\boldsymbol{\Omega}(L) = \sum_{j=0}^{6} \Omega_j L^j$. The cross-sectional constraint ensures that quarterly regional growth is consistent with quarterly national growth, while the temporal constraint ensures that quarterly regional growth is consistent with published annual regional growth.
 
 Because these are soft constraints, they enter the model as:
 
@@ -121,7 +125,7 @@ $$y_{t,r} \mid y_{t-1,r} \sim \mathcal{N}\left(\phi_r \, y_{t-1,r} + (1 - \phi_r
 where
 
 $$
-\mu_{t,r}^{\text{exog}} = \boldsymbol{\Lambda}_r \mathbf{F}_t + \boldsymbol{\Gamma}_r \mathbf{X}_t + \delta_r \, s_{t,r}
+\mu_{t,r}^{\text{exog}} = \alpha_r + \boldsymbol{\Lambda}_r \mathbf{F}_t + \boldsymbol{\Gamma}_r \mathbf{X}_t + \delta_r \, s_{t,r}
 $$
 
 Note that the $(1 - \phi_r)$ scaling ensures that $\mathbb{E}[y_{t,r}] = \mu_{t,r}^{\text{exog}}$.
@@ -138,13 +142,25 @@ $$
 \mathbf{F}_t = \text{diag}(\boldsymbol{\phi}_f) \mathbf{F}_{t-1} + \boldsymbol{\eta}_t, \quad \mathbf{F}_t^{\text{obs}} = \mathbf{F}_t + \boldsymbol{\epsilon}_t^f
 $$
 
+#### Published quarterly regional growth
+
+Some regions publish quarterly growth (for example Scotland's quarterly GDP), and that is more timely than the annual regional release. If these values are supplied through `region_q_on_q_measure`, then for every region $r$ and quarter $t$ with a published value $y^{\text{pub}}_{t,r}$,
+
+$$
+y_{t,r} = y^{\text{pub}}_{t,r}.
+$$
+
+This is a hard constraint, not a noisy observation. The published values still enter the national constraint, the annual constraint and the regional AR(1) dynamics, so they inform the estimates for the other quarters and regions. Coverage can be partial: any region and quarter without a published value is estimated as usual.
+
 #### Bayesian priors
+
+Scales below are in decimal growth units (0.01 is one percentage point). In the code they live in `ambric.utilities.PRIOR_SCALES`; each growth-unit parameter is sampled on a unit scale and multiplied by its prior scale, which leaves the priors below unchanged but helps the optimiser.
 
 ##### Regional panel and factors
 
-$$\Lambda_\mu \sim \mathcal{N}(0, 0.5) \quad [K]$$
+$$\Lambda_\mu \sim \mathcal{N}(0, 0.01) \quad [K]$$
 
-$$\Lambda_\sigma \sim \text{HalfNormal}(0.2) \quad [K]$$
+$$\Lambda_\sigma \sim \text{HalfNormal}(0.004) \quad [K]$$
 
 $$\Lambda_{r,k} \sim \mathcal{N}(\Lambda_{\mu,k}, \Lambda_{\sigma,k}) \quad [R \times K]$$
 
@@ -158,9 +174,11 @@ $$\sigma_f \sim \text{HalfNormal}(0.1) \quad [K]$$
 
 ##### Macro indicators
 
-$$\Gamma_\mu \sim \mathcal{N}(0, 0.5) \quad [M]$$
+$\Gamma$ is the effect on growth of a one standard deviation move in each macro series.
 
-$$\Gamma_\sigma \sim \text{HalfNormal}(0.15) \quad [M]$$
+$$\Gamma_\mu \sim \mathcal{N}(0, 0.01) \quad [M]$$
+
+$$\Gamma_\sigma \sim \text{HalfNormal}(0.003) \quad [M]$$
 
 $$\Gamma_{r,m} \sim \mathcal{N}(\Gamma_{\mu,m}, \Gamma_{\sigma,m}) \quad [R \times M]$$
 
@@ -174,7 +192,9 @@ $$\delta_r \sim \mathcal{N}(\delta_\mu, \delta_\sigma) \quad [R]$$
 
 ##### Weights and degrees of freedom
 
-$$w \sim \mathcal{N}(1/R, 0.01) \quad [R]$$
+$$w \sim \text{Dirichlet}(\kappa \, \bar{w}) \quad [R]$$
+
+where $\bar{w}$ is the prior centre: the shares passed as `region_weights`, normalised to sum to one, or otherwise shares estimated from the data by regressing annualised national growth on regional annual growth (non-negative, summing to one, shrunk towards $1/R$). Because a Dirichlet needs positive parameters, any share below $0.1/R$ is raised to $0.1/R$ and the shares renormalised. $\kappa$ sets how tightly $w$ is held to $\bar{w}$: the prior standard deviation of $w_r$ is $\sqrt{\bar{w}_r (1 - \bar{w}_r) / (\kappa + 1)}$. By default $\kappa = 500$ for supplied shares and $\kappa = 50$ for estimated ones; set it with `region_weights_concentration`. The data-based estimate is imprecise, because regional growth rates move together and annual observations are few, so supply known shares where you can.
 
 $$\nu_{\text{UK}} \sim \text{Gamma}(6, 1)$$
 
@@ -182,13 +202,17 @@ $$\nu_{\text{A}} \sim \text{Gamma}(3, 0.5)$$
 
 ##### Growth
 
-$$\sigma_\varepsilon \sim \text{HalfNormal}(0.1) \quad [R]$$
+$$\alpha_r \sim \mathcal{N}(0, 0.01) \quad [R]$$
 
-$$\sigma_{\text{A}} \sim \text{HalfNormal}(0.2) \quad [R]$$
+$$\sigma_\varepsilon \sim \text{HalfNormal}(0.005) \quad [R]$$
+
+$$\sigma_{\text{A}} \sim \text{HalfNormal}(0.01) \quad [R]$$
 
 $$\phi_r \sim \mathcal{N}(0.5, 0.15) \quad [R]$$
 
-$$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.01)$$
+$$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.001)$$
+
+The latent $y_{t,r}$ also carry a diffuse $\mathcal{N}(0, 0.05)$ prior.
 
 #### Parameters
 
@@ -203,6 +227,7 @@ $$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.01)$$
 | $\delta_\mu$ | $1$ |
 | $\delta_\sigma$ | $1$ |
 | $\delta_r$ | $R$ |
+| $\alpha_r$ | $R$ |
 | $\phi_f$ | $K$ |
 | $\sigma_f$ | $K$ |
 | $F$ | $T \times K$ |
@@ -216,8 +241,24 @@ $$\sigma_{\text{UK}} \sim \text{HalfNormal}(0.01)$$
 | $\nu_{\text{UK}}$ | $1$ |
 | $\nu_{\text{A}}$ | $1$ |
 
-Total: $5K + 2M + RK + RM + TK + TR + 5R + 5$
+Total: $5K + 2M + RK + RM + TK + TR + 6R + 5$ (of which $w$, summing to one, has $R - 1$ free). Each published quarterly regional value fixes one element of $y_r$, removing one free parameter.
 
 ### Model solution
 
-Prior to estimating the Bayesian model, an XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. These annual predictions are disaggregated to quarterly frequency using a MIDAS bridge equation, producing the bridge signal $\mathbf{s}_t$. The Bayesian state-space model is then estimated using [PyMC](https://www.pymc.io/welcome.html) and [pytensor](https://pytensor.readthedocs.io/en/latest/) via ADVI (Automatic Differentiation Variational Inference).
+Missing values in the regional indicators are first filled in by iterative imputation (scikit-learn's `IterativeImputer` with a Bayesian ridge estimator). The imputed panel is used for the factor analysis and the bridge equation. XGBoost uses the raw indicators, since it handles missing values itself.
+
+Prior to estimating the Bayesian model, an XGBoost model is trained on annually-aggregated regional indicators and macro variables to predict annual regional growth. For each year with a published outturn, the prediction comes from a model trained on all the other years, so the predictions passed on are out-of-fold. To keep their regularisation independent of units, XGBoost is fitted to a standardised target and the bridge regression to standardised features and target.
+
+The annual predictions are disaggregated to quarterly frequency using a MIDAS bridge equation. This is a ridge regression, pooled across regions, of published annual regional growth on the XGBoost prediction and on the MIDAS-weighted quarters of national growth and of each regional indicator. The quarterly weights follow an exponential Almon polynomial chosen to maximise the bridge's fit, or are equal if `bridge_use_almon=False`. Applying the fitted coefficients quarter by quarter gives the bridge signal $\mathbf{s}_t$.
+
+The Bayesian state-space model is then estimated using [PyMC](https://www.pymc.io/welcome.html) and [pytensor](https://pytensor.readthedocs.io/en/latest/) via ADVI (Automatic Differentiation Variational Inference).
+
+During fitting, the ADVI loss and its improvement are logged at regular intervals. The run stops early if the parameters stop changing, which counts as converged. Otherwise, a warning is logged after fitting if the loss was still falling at the end of the run, in which case more iterations are needed. `amb.plot_advi_convergence()` shows the loss path.
+
+### Evaluating nowcasts out of sample
+
+`ambric.run_out_of_sample_exercise` replays history: at each step it hides the annual regional data that would not yet have been published, fits the model, and records the nowcasts alongside the outturns that were later published. The [usage guide](https://aeturrell.github.io/ambric/) shows how to summarise the results.
+
+### Checking the model against simulated data
+
+`ambric.benchmark.run_recovery_benchmark` fits the model to simulated data and reports how well it recovers the true quarterly regional growth, the unpublished annual values, the regional weights and the noise scales. Two full-length versions run as tests with `pytest -m slow`.

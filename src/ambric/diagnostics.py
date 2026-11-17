@@ -135,12 +135,13 @@ def trace_to_series(
     # Quarterly regional estimates
     y_q_r_est_point = posterior["y_reg"].mean(dim=("chain", "draw")).values
 
-    # UK quarterly estimates
-    y_q_uk_dist_est = (posterior["y_reg"] * posterior["w"]).sum(dim="w_dim_0")
-    y_q_uk_est_point = y_q_uk_dist_est.mean(dim=("chain", "draw")).values
-
-    # Now take the mean over the regional axis to get the national growth rates
-    y_q_uk_est_point = y_q_uk_est_point.mean(axis=1)
+    # UK quarterly estimates: the weighted sum of regional growth,
+    # sum_r w_r * y_reg[t, r], formed draw by draw and then averaged. The
+    # two variables name their region dimension differently, so the sum is
+    # taken on the underlying arrays: (chain, draw, T, R) with (chain, draw, R).
+    y_q_uk_est_point = np.einsum(
+        "cdtr,cdr->cdt", posterior["y_reg"].values, posterior["w"].values
+    ).mean(axis=(0, 1))
 
     # Annual regional estimates
 
@@ -161,6 +162,10 @@ def trace_to_series(
 
     # 5. Calculate mean for each region (no bands as ADVI)
     y_a_r_est_point = y_a_r_dist.mean(dim=("chain", "draw")).to_numpy()
+
+    # The first rows lack a full window of lags, so their sums are partial
+    # and not estimates of annual growth.
+    y_a_r_est_point[: len(OMEGA) - 1] = np.nan
 
     return (
         y_q_uk_est_point,
@@ -325,7 +330,7 @@ def plot_regional_annual_estimate(
         sharey=True,
     )
     axes = axes.flatten()
-    y_lim = np.max(y_annual_est) * 1.2
+    y_lim = np.nanmax(y_annual_est) * 1.2
     y_lim = float(f"{float(f'{y_lim * 1.3:.{2}g}'):g}")
     for i, r in enumerate(range(R)):
         axes[i].axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
@@ -417,7 +422,7 @@ def plot_single_region_annual_estimate(
         xycoords=("data", "axes fraction"),
     )
     fig.autofmt_xdate()
-    min_point_implied = np.argmin(y_annual_est[:, region_idx])
+    min_point_implied = np.nanargmin(y_annual_est[:, region_idx])
     max_point_true = np.argmax(y_annual_true[:, region_idx])
     ax.annotate(
         "Estimated",
@@ -1410,6 +1415,140 @@ def oos_q_on_4q_performance_table(
     if path:
         summary_df.to_csv(path / "oos_classification_performance.csv")
     return summary_df
+
+
+class AdviProgressLogger:
+    """Callback for ``pm.fit`` that logs how the ADVI loss is improving.
+
+    Every ``every`` iterations it logs the mean loss (negative ELBO) over
+    the most recent ``every`` iterations and the change since the previous
+    report. A loss that is still falling steadily at the final report means
+    the fit has not converged.
+    """
+
+    def __init__(self, every: int = 10000, n_total: int | None = None) -> None:
+        """Set up the logger.
+
+        Args:
+            every (int): Number of iterations between log lines.
+            n_total (int | None): Planned number of iterations, used only to
+                show progress as ``i/n_total``.
+        """
+        if every < 1:
+            raise ValueError(f"every must be at least 1, got {every}.")
+        self.every = every
+        self.n_total = n_total
+        self.previous_mean: float | None = None
+
+    def __call__(self, approx, losses, i: int) -> None:  # noqa: ANN001
+        """Log progress if ``i`` is a multiple of ``every``."""
+        if losses is None or i % self.every != 0 or i == 0:
+            return
+        window_mean = float(np.mean(losses[-self.every :]))
+        progress = f"{i}/{self.n_total}" if self.n_total is not None else f"{i}"
+        if self.previous_mean is None:
+            logger.info(f"   ADVI {progress}: mean loss = {window_mean:.2f}")
+        else:
+            improvement = self.previous_mean - window_mean
+            logger.info(
+                f"   ADVI {progress}: mean loss = {window_mean:.2f} "
+                f"(improved by {improvement:.2f} over last {self.every} iterations)"
+            )
+        self.previous_mean = window_mean
+
+
+def assess_advi_convergence(
+    loss_history: npt.NDArray[np.float64],
+    tolerance: float = 1.0,
+    window_fraction: float = 0.05,
+) -> dict:
+    """Judge whether an ADVI fit had stopped improving by its end.
+
+    Compares the mean loss (negative ELBO, in nats) over the final
+    ``window_fraction`` of iterations with the mean over the window of the
+    same length just before it. The fit is treated as converged when the
+    loss fell by no more than ``tolerance`` nats between the two windows
+    and the windows are long enough to measure that: the standard error of
+    the difference must also be within ``tolerance``. A short or very noisy
+    run therefore never counts as converged.
+
+    Args:
+        loss_history (npt.NDArray[np.float64]): Loss at each iteration.
+        tolerance (float): Largest fall in mean loss, in nats, between the
+            two final windows that still counts as converged.
+        window_fraction (float): Fraction of iterations in each window.
+
+    Returns:
+        dict: With keys ``converged`` (bool), ``final_loss`` (mean loss in
+            the final window), ``improvement`` (fall in mean loss between
+            the two windows; positive means still improving),
+            ``standard_error`` (of that fall), ``window`` (iterations per
+            window) and ``n_iterations``.
+    """
+    losses = np.asarray(loss_history, dtype=np.float64)
+    n = len(losses)
+    window = max(int(n * window_fraction), 1)
+    if n < 2 * window or not np.all(np.isfinite(losses[-2 * window :])):
+        return {
+            "converged": False,
+            "final_loss": float(losses[-1]) if n > 0 else float("nan"),
+            "improvement": float("nan"),
+            "standard_error": float("nan"),
+            "window": window,
+            "n_iterations": n,
+        }
+    last, previous = losses[-window:], losses[-2 * window : -window]
+    final_loss = float(last.mean())
+    improvement = float(previous.mean()) - final_loss
+    standard_error = float(np.sqrt((last.var() + previous.var()) / window))
+    return {
+        "converged": bool(improvement <= tolerance and standard_error <= tolerance),
+        "final_loss": final_loss,
+        "improvement": improvement,
+        "standard_error": standard_error,
+        "window": window,
+        "n_iterations": n,
+    }
+
+
+def plot_advi_convergence(
+    loss_history: npt.NDArray[np.float64],
+    path: Path | None = None,
+    smoothing_window: int | None = None,
+) -> None:
+    """Plot the ADVI loss against iteration.
+
+    Shows a rolling mean of the loss (negative ELBO). The first tenth of
+    the run is left out so that the large early losses do not hide the
+    behaviour near the end. A curve that is still sloping down at the right
+    edge means more iterations are needed.
+
+    Args:
+        loss_history (npt.NDArray[np.float64]): Loss at each iteration.
+        path (Path | None): Directory to save the figure as SVG. When
+            ``None`` the figure is displayed interactively.
+        smoothing_window (int | None): Iterations in the rolling mean.
+            Defaults to 1% of the run.
+    """
+    losses = pd.Series(np.asarray(loss_history, dtype=np.float64))
+    n = len(losses)
+    if smoothing_window is None:
+        smoothing_window = max(n // 100, 1)
+    smoothed = losses.rolling(smoothing_window, min_periods=1).mean()
+    start = n // 10
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(smoothed.index[start:], smoothed.iloc[start:], color=colour_wheel[0], lw=2)
+    ax.set_xlabel("ADVI iteration")
+    ax.set_title(
+        f"ADVI loss (negative ELBO), rolling mean over {smoothing_window} iterations",
+        loc="left",
+    )
+    plt.tight_layout()
+    if path is not None:
+        plt.savefig(path / "AMBRIC_advi_convergence.svg")
+    else:
+        plt.show()
+    plt.close()
 
 
 def plot_seasonally_adjusted_q_on_q_growth(
